@@ -95,7 +95,8 @@ def _build_html(
                     meta_parts.append(f"Level: {ws['level']}")
                 meta_html = ""
                 if meta_parts:
-                    meta_html = f'<br><span style="font-size:11px;color:#888">{" &bull; ".join(meta_parts)}</span>'
+                    sep = " &bull; "
+                    meta_html = f'<br><span style="font-size:11px;color:#888">{sep.join(meta_parts)}</span>'
                 maps_html = ""
                 if ws.get("maps_link"):
                     maps_html = f' <a href="{ws["maps_link"]}" style="font-size:11px">&#x1f4cd; Map</a>'

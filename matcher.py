@@ -377,8 +377,9 @@ def build_slack_message(candidate: dict, workshops: list[dict]) -> str:
             meta_parts.append(f"Enrollment: {ws['enrollment']}")
         if ws.get("level"):
             meta_parts.append(f"Level: {ws['level']}")
-        meta_str = f"  |  {' \u2022 '.join(meta_parts)}" if meta_parts else ""
-        maps_str = f"\n    \U0001f4cd {ws['maps_link']}"
+        bullet = " \u2022 "
+        meta_str = f"  |  {bullet.join(meta_parts)}" if meta_parts else ""
+        maps_str = "\n    \U0001f4cd " + ws['maps_link']
         workshop_lines.append(
             f"  \u2022 {ws['lesson']} @ {ws['site']} \u2014 {ws['day']}s {ws['time']}{dates}"
             f"  [{ws['gap_type']}]{tentative}{meta_str}{maps_str}"
