@@ -40,6 +40,10 @@ SHEET_LEAD_COL = "Lead"
 SHEET_LEADER_1_COL = "Leader 1"
 SHEET_LEADER_2_COL = "Leader 2"
 SHEET_LEADER_3_COL = "Leader 3"
+SHEET_DISTRICT_COL = "District"
+SHEET_ZONE_COL = "Zone"
+SHEET_ENROLLMENT_COL = "Enrollment"
+SHEET_LEVEL_COL = "Level"
 
 # ---------------------------------------------------------------------------
 # Location normalization: maps Notion location values -> Sheet Region values

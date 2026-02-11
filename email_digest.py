@@ -86,17 +86,31 @@ def _build_html(
                 tentative = ""
                 if ws.get("tentative_names"):
                     tentative = f' <span style="color:#999">(tentative: {", ".join(ws["tentative_names"])})</span>'
+                meta_parts = []
+                if ws.get("district"):
+                    meta_parts.append(f"District: {ws['district']}")
+                if ws.get("enrollment"):
+                    meta_parts.append(f"Enrollment: {ws['enrollment']}")
+                if ws.get("level"):
+                    meta_parts.append(f"Level: {ws['level']}")
+                meta_html = ""
+                if meta_parts:
+                    meta_html = f'<br><span style="font-size:11px;color:#888">{" &bull; ".join(meta_parts)}</span>'
+                maps_html = ""
+                if ws.get("maps_link"):
+                    maps_html = f' <a href="{ws["maps_link"]}" style="font-size:11px">&#x1f4cd; Map</a>'
                 ws_lines += (
                     f"<li>{ws['lesson']} @ {ws['site']} &mdash; "
                     f"{ws['day']}s {ws['time']} "
                     f"({ws['start_date']} &ndash; {ws['end_date']}) "
-                    f"<b>[{ws['gap_type']}]</b>{tentative}</li>\n"
+                    f"<b>[{ws['gap_type']}]</b>{tentative}{maps_html}{meta_html}</li>\n"
                 )
 
             first_name = candidate["name"].split()[0] if candidate["name"] else "there"
+            site_name = ws_list[0]["site"] if ws_list else "a school"
             draft = (
-                f"Hi {first_name}, we have an opening for a workshop leader and think "
-                f"you'd be a great fit! Would any of these work for your schedule?"
+                f"Hi {first_name}, we have an opening for a workshop leader at {site_name} "
+                f"and think you'd be a great fit! Would any of these work for your schedule?"
             )
 
             cand_rows += f"""

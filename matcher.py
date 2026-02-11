@@ -12,7 +12,9 @@ import json
 import logging
 import os
 import ssl
+import time
 from datetime import datetime, timezone, date
+from urllib.parse import quote
 
 import certifi
 import gspread
@@ -286,6 +288,13 @@ def get_gap_workshops(gc: gspread.Client, creds: ServiceCredentials) -> list[dic
 
         gap_type = "OPEN (no leaders)" if all_empty else "TENTATIVE (interview only)"
 
+        district = row.get(config.SHEET_DISTRICT_COL, "").strip()
+        zone = row.get(config.SHEET_ZONE_COL, "").strip()
+        enrollment = row.get(config.SHEET_ENROLLMENT_COL, "").strip()
+        level = row.get(config.SHEET_LEVEL_COL, "").strip()
+        maps_query = f"{site} {region}".strip()
+        maps_link = f"https://www.google.com/maps/search/{quote(maps_query)}"
+
         gaps.append({
             "region": region,
             "site": site,
@@ -297,6 +306,11 @@ def get_gap_workshops(gc: gspread.Client, creds: ServiceCredentials) -> list[dic
             "gap_type": gap_type,
             "tentative_names": tentative_names,
             "workshop_key": f"{region}|{site}|{lesson}|{day}|{time_str}",
+            "district": district,
+            "zone": zone,
+            "enrollment": enrollment,
+            "level": level,
+            "maps_link": maps_link,
         })
 
     log.info("Found %d upcoming workshop(s) with true gaps", len(gaps))
@@ -356,9 +370,18 @@ def build_slack_message(candidate: dict, workshops: list[dict]) -> str:
         dates = ""
         if ws["start_date"] or ws["end_date"]:
             dates = f"  |  {ws['start_date']} \u2013 {ws['end_date']}"
+        meta_parts = []
+        if ws.get("district"):
+            meta_parts.append(f"District: {ws['district']}")
+        if ws.get("enrollment"):
+            meta_parts.append(f"Enrollment: {ws['enrollment']}")
+        if ws.get("level"):
+            meta_parts.append(f"Level: {ws['level']}")
+        meta_str = f"  |  {' \u2022 '.join(meta_parts)}" if meta_parts else ""
+        maps_str = f"\n    \U0001f4cd {ws['maps_link']}"
         workshop_lines.append(
             f"  \u2022 {ws['lesson']} @ {ws['site']} \u2014 {ws['day']}s {ws['time']}{dates}"
-            f"  [{ws['gap_type']}]{tentative}"
+            f"  [{ws['gap_type']}]{tentative}{meta_str}{maps_str}"
         )
     ws_block = "\n".join(workshop_lines)
 
@@ -372,7 +395,8 @@ def build_slack_message(candidate: dict, workshops: list[dict]) -> str:
     email_template = (
         f"Subject: Workshop Opportunity at Kodely\n\n"
         f"Hi {first_name},\n\n"
-        f"We have an opening for a workshop leader and think you'd be a great fit! "
+        f"We have an opening for a workshop leader at {workshops[0]['site']} and think "
+        f"you'd be a great fit! "
         f"Here are the available workshops in your area:\n\n"
         f"{workshop_list_for_email}\n\n"
         f"Would any of these work for your schedule? Let us know and we can get "
@@ -391,12 +415,19 @@ def build_slack_message(candidate: dict, workshops: list[dict]) -> str:
     )
 
 
-def post_to_slack(slack: SlackClient, message: str) -> None:
-    try:
-        slack.chat_postMessage(channel=config.SLACK_CHANNEL, text=message)
-    except SlackApiError as e:
-        log.error("Slack API error: %s", e.response["error"])
-        raise
+def post_to_slack(slack: SlackClient, message: str, retries: int = 3) -> None:
+    for attempt in range(retries):
+        try:
+            slack.chat_postMessage(channel=config.SLACK_CHANNEL, text=message)
+            return
+        except SlackApiError as e:
+            if e.response["error"] == "ratelimited" and attempt < retries - 1:
+                wait = int(e.response.headers.get("Retry-After", 5))
+                log.warning("Rate limited by Slack, waiting %ds...", wait)
+                time.sleep(wait)
+            else:
+                log.error("Slack API error: %s", e.response["error"])
+                raise
 
 
 # ---------------------------------------------------------------------------
