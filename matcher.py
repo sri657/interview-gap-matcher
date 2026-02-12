@@ -129,6 +129,16 @@ def get_matchable_candidates() -> list[dict]:
 
             email = props.get("Email", {}).get("email", "") or ""
 
+            # Format created date for display
+            created_display = ""
+            if created:
+                try:
+                    created_display = datetime.fromisoformat(
+                        created.replace("Z", "+00:00")
+                    ).strftime("%b %d, %Y")
+                except ValueError:
+                    pass
+
             results.append({
                 "id": page["id"],
                 "name": name,
@@ -136,6 +146,7 @@ def get_matchable_candidates() -> list[dict]:
                 "locations": locations,
                 "email": email,
                 "source": "notion",
+                "source_date": created_display,
             })
 
         if not data.get("has_more"):
@@ -183,34 +194,39 @@ def _classify_leader_cell(bg: dict, strike: bool) -> str:
       'strikethrough' — struck-through name (backout)
       'normal'     — confirmed / no special status
     """
-    r = bg.get("red", 1.0)
-    g = bg.get("green", 1.0)
-    b = bg.get("blue", 1.0)
+    # Google Sheets API omits color channels that are 0
+    # e.g. pure red = {"red": 1}, pink = {"red": 1, "green": 0.6},
+    #      cyan = {"red": 0.6, "blue": 1}, white = {"red": 1, "green": 1, "blue": 1}
+    r = bg.get("red", 0.0)
+    g = bg.get("green", 0.0)
+    b = bg.get("blue", 0.0)
+    if not bg:
+        r = g = b = 1.0
 
-    # Strikethrough (gray bg + struck text) = backout
+    # Strikethrough = backout
     if strike:
         return "strikethrough"
-    # Pink bg (1, 0.6, 1) = tentative
-    if r > 0.9 and g < 0.7 and b > 0.9:
-        return "pink"
-    # Cyan bg (0.6, 1, 1) = Scoot / 3rd-party agency
-    if r < 0.7 and g > 0.9 and b > 0.9:
-        return "scoot"
-    # Red bg = backout (high red, low green, low blue)
+    # Gray bg (e.g. 0.4-0.72 uniform RGB) = cancelled / excluded
+    if r < 0.75 and g < 0.75 and b < 0.75 and abs(r - g) < 0.05 and abs(g - b) < 0.05:
+        return "gray"
+    # Red bg: high red, low green, low blue — e.g. {red:1} = (1,0,0)
     if r > 0.7 and g < 0.4 and b < 0.4:
         return "red"
-    # Dark gray without strike (e.g. WESTSIDE STAFFING) = 3rd-party
-    if r < 0.65 and g < 0.65 and b < 0.65 and abs(r - g) < 0.05 and abs(g - b) < 0.05:
+    # Pink bg: high red, mid green, low blue — e.g. {red:1, green:0.6} = (1,0.6,0)
+    if r > 0.9 and 0.3 < g < 0.8 and b < 0.2:
+        return "pink"
+    # Cyan bg: mid red, low green, high blue — e.g. {red:0.6, blue:1} = (0.6,0,1)
+    if 0.3 < r < 0.8 and g < 0.2 and b > 0.9:
         return "scoot"
     return "normal"
 
 
 def _is_pink(bg: dict) -> bool:
     """Legacy helper — check if a cell background is the pink tentative color."""
-    r = bg.get("red", 1.0)
-    g = bg.get("green", 1.0)
-    b = bg.get("blue", 1.0)
-    return r > 0.9 and g < 0.7 and b > 0.9
+    r = bg.get("red", 0.0)
+    g = bg.get("green", 0.0)
+    b = bg.get("blue", 0.0)
+    return r > 0.9 and 0.3 < g < 0.8 and b < 0.2
 
 
 def _get_worksheet_by_gid(spreadsheet: gspread.Spreadsheet, gid: int) -> gspread.Worksheet:
@@ -317,17 +333,27 @@ def get_gap_workshops(gc: gspread.Client, creds: ServiceCredentials) -> list[dic
         cell_classes = fmt_map.get(idx, ["normal", "normal", "normal"])
         leaders = [leader1, leader2, leader3]
 
-        # Determine gap type from cell classifications
-        all_empty = not leader1 and not leader2 and not leader3
+        # Gray = cancelled position — ignore those leaders entirely
+        # If ALL filled leaders are gray, the whole row is cancelled
+        non_gray_leaders = [
+            (leader, cls) for leader, cls in zip(leaders, cell_classes)
+            if leader and cls != "gray"
+        ]
+        gray_count = sum(1 for leader, cls in zip(leaders, cell_classes) if leader and cls == "gray")
+        if gray_count > 0 and not non_gray_leaders:
+            continue  # all filled positions are cancelled — skip row
+
+        # Determine gap type from non-gray cell classifications
+        all_empty = all(not leader or cls == "gray" for leader, cls in zip(leaders, cell_classes))
         gap_names: dict[str, list[str]] = {
             "tentative": [],   # pink
             "backout": [],     # red, strikethrough
-            "3rd_party": [],   # scoot, gray
+            "3rd_party": [],   # scoot (cyan)
         }
         has_gap_cell = False
 
         for leader, cls in zip(leaders, cell_classes):
-            if not leader:
+            if not leader or cls == "gray":
                 continue
             if cls == "pink":
                 gap_names["tentative"].append(leader)
@@ -339,7 +365,7 @@ def get_gap_workshops(gc: gspread.Client, creds: ServiceCredentials) -> list[dic
                 gap_names["3rd_party"].append(leader)
                 has_gap_cell = True
 
-        # A row is a gap if: all leaders empty, OR any leader cell is flagged
+        # A row is a gap if: all leaders empty/grey, OR any leader cell is flagged
         if not all_empty and not has_gap_cell:
             continue
 
@@ -497,6 +523,11 @@ def get_form_candidates(gc: "gspread.Client") -> list[dict]:
         returning = _get(returning_idx)
         status = "Returning Leader" if returning.lower() == "yes" else "Form Applicant"
 
+        # Format form date for display
+        form_date_display = ""
+        if form_date:
+            form_date_display = form_date.strftime("%b %d, %Y")
+
         results.append({
             "id": f"form::{email or name}",
             "name": name,
@@ -505,6 +536,7 @@ def get_form_candidates(gc: "gspread.Client") -> list[dict]:
             "email": email,
             "available_days": available_days,
             "source": "form",
+            "source_date": form_date_display,
         })
 
     log.info("Found %d form candidate(s) within %d-month window", len(results), config.CANDIDATE_FRESHNESS_MONTHS)

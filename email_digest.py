@@ -153,9 +153,12 @@ def _build_html(
                     cand_days = c.get("available_days")
                     if cand_days:
                         days_str = f' <span style="font-size:10px;color:#666">({", ".join(sorted(cand_days))})</span>'
+                    date_str = ""
+                    if c.get("source_date"):
+                        date_str = f' <span style="font-size:10px;color:#999">{c["source_date"]}</span>'
                     cand_lines.append(
                         f'{badge}{c["name"]}{email_str}'
-                        f' <span style="font-size:11px;color:#888">[{c["status"]}]</span>{days_str}'
+                        f' <span style="font-size:11px;color:#888">[{c["status"]}]</span>{days_str}{date_str}'
                     )
                 cand_cell = "<br>".join(cand_lines)
             else:
@@ -221,6 +224,7 @@ def _build_html(
                 badge = '<span style="background:#e3f2fd;color:#1565c0;padding:2px 6px;border-radius:3px;font-size:11px;font-weight:bold">NOTION</span>'
             days_str = ", ".join(sorted(c.get("available_days", []))) or "&mdash;"
             email_display = c.get("email") or "(none)"
+            source_date = c.get("source_date", "") or "&mdash;"
             roster_rows += f"""
             <tr>
               <td {td}>{badge}</td>
@@ -228,6 +232,7 @@ def _build_html(
               <td {td}>{email_display}</td>
               <td {td}>{c['status']}</td>
               <td {td} style="padding:8px;border:1px solid #ddd;vertical-align:top;font-size:12px">{days_str}</td>
+              <td {td} style="padding:8px;border:1px solid #ddd;vertical-align:top;font-size:12px">{source_date}</td>
             </tr>"""
 
         roster_blocks.append(f"""
@@ -241,6 +246,7 @@ def _build_html(
             <th {th}>Email</th>
             <th {th}>Status</th>
             <th {th}>Available Days</th>
+            <th {th}>Date</th>
           </tr>
           {roster_rows}
         </table>""")
@@ -404,12 +410,13 @@ def _build_html(
                     email_str = c.get("email") or "(none)"
                     days_str = ", ".join(sorted(c.get("available_days", [])))
                     days_part = f" | Days: {days_str}" if days_str else ""
+                    date_part = f" | {c['source_date']}" if c.get("source_date") else ""
                     cand_list_html += (
                         f'<div style="padding:3px 0">'
                         f'<span style="background:{badge_bg};color:{badge_fg};padding:1px 5px;'
                         f'border-radius:3px;font-size:10px;font-weight:bold">{badge_label}</span> '
                         f'<b>{c["name"]}</b> &mdash; {email_str} '
-                        f'<span style="color:#888;font-size:11px">[{c["status"]}]{days_part}</span>'
+                        f'<span style="color:#888;font-size:11px">[{c["status"]}]{days_part}{date_part}</span>'
                         f'</div>'
                     )
                 match_status = f'<span style="color:#2e7d32;font-weight:bold">{len(cands_for_gap)} candidate{"s" if len(cands_for_gap)!=1 else ""} matched</span>'
