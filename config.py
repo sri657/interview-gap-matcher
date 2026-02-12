@@ -185,3 +185,30 @@ OB_DONE_VALUES = {"Done", "Yes", "Sent", "Approved", "Complete", "Completed", "A
 # Urgency thresholds (days before start date)
 OB_URGENT_DAYS = 3
 OB_WARNING_DAYS = 7
+
+# ---------------------------------------------------------------------------
+# Pipeline stages (Readiness Status values, in order)
+# ---------------------------------------------------------------------------
+PIPELINE_STAGES = [
+    "Matched",
+    "Background Check Pending",
+    "Onboarding Setup",
+    "Training In Progress",
+    "ACTIVE",
+]
+
+# Fields required to be complete for Onboarding Setup → Training In Progress
+OB_ACCESS_FIELDS = [
+    OB_SLACK_INVITE_PROPERTY,
+    OB_WORKSHOP_SLACK_PROPERTY,
+    OB_LESSON_PLAN_PROPERTY,
+    OB_ONBOARDING_EMAIL_PROPERTY,
+]
+
+# Training status (Notion select field)
+OB_TRAINING_STATUS_PROPERTY = "Training Status"
+
+# Ops Hub cell colors (Google Sheets API RGB 0-1 scale)
+CELL_COLOR_ORANGE = {"red": 1.0, "green": 0.6, "blue": 0.0}       # Matched
+CELL_COLOR_PURPLE = {"red": 0.6, "green": 0.0, "blue": 1.0}       # BG Check Pending
+CELL_COLOR_GREEN  = {"red": 0.0, "green": 0.8, "blue": 0.0}       # Onboarding Setup

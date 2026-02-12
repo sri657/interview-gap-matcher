@@ -50,7 +50,7 @@ NOTION_HEADERS = {
 }
 
 # Cell classes that trigger onboarding/offboarding events
-ONBOARDING_CLASSES = {"green"}
+ONBOARDING_CLASSES = {"orange"}
 COMPLIANCE_CLASSES = {"purple"}
 OFFBOARDING_CLASSES = {"red", "strikethrough"}
 

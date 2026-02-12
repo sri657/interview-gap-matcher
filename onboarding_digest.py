@@ -23,11 +23,15 @@ import time
 from datetime import date, datetime, timezone
 
 import certifi
+import gspread
 import httpx
+from google.oauth2.service_account import Credentials as ServiceCredentials
+import google.auth.transport.requests
 from slack_sdk import WebClient as SlackClient
 from slack_sdk.errors import SlackApiError
 
 import config
+from matcher import _get_worksheet_by_gid
 
 os.environ.setdefault("SSL_CERT_FILE", certifi.where())
 ssl._create_default_https_context = lambda: ssl.create_default_context(
@@ -89,7 +93,8 @@ def query_onboarding_leaders() -> list[dict]:
             {"property": "Readiness Status", "select": {"equals": "Matched"}},
             {"property": "Readiness Status", "select": {"equals": "Background Check Pending"}},
             {"property": "Readiness Status", "select": {"equals": "Onboarding Setup"}},
-            {"property": "Readiness Status", "select": {"equals": "Training Pending"}},
+            {"property": "Readiness Status", "select": {"equals": "Training In Progress"}},
+            {"property": "Readiness Status", "select": {"equals": "ACTIVE"}},
             {"property": "Readiness Status", "select": {"equals": "Returning Leader- Onboarding Needed"}},
             {"property": "Readiness Status", "select": {"equals": "Onboarding"}},
         ],
@@ -199,6 +204,221 @@ def _get_incomplete_tasks(page: dict) -> list[str]:
         if not _is_task_complete(value):
             incomplete.append(display_name)
     return incomplete
+
+
+# ---------------------------------------------------------------------------
+# Pipeline transition helpers
+# ---------------------------------------------------------------------------
+
+def _compliance_started(page: dict) -> bool:
+    """Return True if Compliance Status is no longer 'Not Sent' or empty."""
+    val = _get_property_value(page, config.OB_COMPLIANCE_STATUS_PROPERTY).strip()
+    return val not in ("Not Sent", "")
+
+
+def _all_access_complete(page: dict) -> bool:
+    """Return True if ALL onboarding access fields are in done values."""
+    return all(
+        _is_task_complete(_get_property_value(page, field))
+        for field in config.OB_ACCESS_FIELDS
+    )
+
+
+# Transition messages keyed by target stage
+_TRANSITION_MESSAGES = {
+    "Background Check Pending": "Compliance check has been initiated.",
+    "Onboarding Setup": "Background check cleared — ready for access setup.",
+    "Onboarding Setup (returning)": "Returning leader — Gusto reactivated, ready for access setup.",
+    "Training In Progress": "All onboarding access granted — waiting on training.",
+    "ACTIVE": "Training complete — please set up Gusto for this leader.",
+}
+
+
+def _check_transition(page: dict) -> tuple[str, str] | None:
+    """Determine if a page should advance to the next pipeline stage.
+
+    Returns (new_stage, message) or None if no transition applies.
+    """
+    status = _get_property_value(page, "Readiness Status")
+
+    if status == "Matched":
+        if _compliance_started(page):
+            return "Background Check Pending", _TRANSITION_MESSAGES["Background Check Pending"]
+
+    elif status == "Background Check Pending":
+        compliance_val = _get_property_value(page, config.OB_COMPLIANCE_STATUS_PROPERTY)
+        if _is_task_complete(compliance_val):
+            return "Onboarding Setup", _TRANSITION_MESSAGES["Onboarding Setup"]
+
+    elif status == "Onboarding Setup":
+        if _all_access_complete(page):
+            return "Training In Progress", _TRANSITION_MESSAGES["Training In Progress"]
+
+    elif status == "Returning Leader- Onboarding Needed":
+        gusto_val = _get_property_value(page, config.OB_GUSTO_PROPERTY)
+        if _is_task_complete(gusto_val):
+            return "Onboarding Setup", _TRANSITION_MESSAGES["Onboarding Setup (returning)"]
+
+    elif status == "Training In Progress":
+        training_val = _get_property_value(page, config.OB_TRAINING_STATUS_PROPERTY)
+        if _is_task_complete(training_val):
+            return "ACTIVE", _TRANSITION_MESSAGES["ACTIVE"]
+
+    return None
+
+
+def _patch_readiness_status(page_id: str, new_stage: str) -> bool:
+    """Update a Notion page's Readiness Status. Returns True on success."""
+    resp = httpx.patch(
+        f"{NOTION_BASE}/pages/{page_id}",
+        headers=NOTION_HEADERS,
+        json={"properties": {"Readiness Status": {"select": {"name": new_stage}}}},
+        timeout=30,
+    )
+    if resp.status_code >= 400:
+        log.error("Failed to advance page %s to %s: %s %s", page_id, new_stage, resp.status_code, resp.text)
+        return False
+    return True
+
+
+# Map target stage -> Ops Hub cell color (only stages that change color)
+_STAGE_COLOR_MAP = {
+    "Background Check Pending": config.CELL_COLOR_PURPLE,
+    "Onboarding Setup": config.CELL_COLOR_GREEN,
+}
+
+
+def _find_leader_cells(sheet_data: list[list[str]], leader_name: str) -> list[tuple[int, int]]:
+    """Search columns T(19), U(20), V(21) for exact name match.
+
+    Returns list of (row_index, col_index) tuples (0-based).
+    """
+    matches = []
+    for row_idx, row in enumerate(sheet_data):
+        for col_idx in (19, 20, 21):  # T, U, V columns
+            if col_idx < len(row) and row[col_idx].strip() == leader_name:
+                matches.append((row_idx, col_idx))
+    return matches
+
+
+def _update_cell_color(
+    creds: ServiceCredentials, row: int, col: int, color_rgb: dict
+) -> None:
+    """Set a single cell's background color in the Ops Hub sheet via Sheets API."""
+    creds_copy = creds.with_scopes(["https://www.googleapis.com/auth/spreadsheets"])
+    creds_copy.refresh(google.auth.transport.requests.Request())
+
+    # row/col are 0-based into the data (including header row 0)
+    request_body = {
+        "requests": [
+            {
+                "updateCells": {
+                    "rows": [
+                        {
+                            "values": [
+                                {
+                                    "userEnteredFormat": {
+                                        "backgroundColor": color_rgb,
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    "fields": "userEnteredFormat.backgroundColor",
+                    "range": {
+                        "sheetId": config.SHEET_GID,
+                        "startRowIndex": row,
+                        "endRowIndex": row + 1,
+                        "startColumnIndex": col,
+                        "endColumnIndex": col + 1,
+                    },
+                }
+            }
+        ]
+    }
+
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{config.GOOGLE_SHEET_ID}:batchUpdate"
+    headers = {"Authorization": f"Bearer {creds_copy.token}"}
+    resp = httpx.post(url, headers=headers, json=request_body, timeout=30)
+    if resp.status_code >= 400:
+        log.error("Failed to update cell color at row=%d col=%d: %s %s", row, col, resp.status_code, resp.text)
+    else:
+        log.info("Updated cell color at row=%d col=%d", row, col)
+
+
+def advance_pipeline(
+    leaders: list[dict],
+    state: dict,
+    slack: "SlackClient",
+    dry_run: bool = False,
+    sheet_data: list[list[str]] | None = None,
+    creds: ServiceCredentials | None = None,
+) -> list[str]:
+    """Check each leader for pipeline transitions and advance if conditions are met.
+
+    Returns list of transition messages. Updates state dict to track notified transitions.
+    """
+    messages = []
+
+    for page in leaders:
+        page_id = page.get("id", "")
+        name = _get_leader_name(page)
+        region = _get_region(page)
+
+        if not name:
+            continue
+
+        result = _check_transition(page)
+        if result is None:
+            continue
+
+        new_stage, reason = result
+        current_stage = _get_property_value(page, "Readiness Status")
+
+        # Deduplicate: don't re-advance if we already moved this page in a previous run
+        pipeline_key = f"pipeline_{page_id}_{new_stage}"
+        if state.get(pipeline_key):
+            continue
+
+        if dry_run:
+            print(f"--- DRY RUN: PIPELINE ADVANCE ---")
+            print(f"  {name} ({region}): {current_stage} → {new_stage}")
+            print(f"  Reason: {reason}")
+            color = _STAGE_COLOR_MAP.get(new_stage)
+            if color and sheet_data:
+                cells = _find_leader_cells(sheet_data, name)
+                print(f"  Color sync: would update {len(cells)} cell(s) to {new_stage} color")
+            print()
+        else:
+            if not _patch_readiness_status(page_id, new_stage):
+                continue
+
+            # Sync Ops Hub cell color if this transition has a color mapping
+            color = _STAGE_COLOR_MAP.get(new_stage)
+            if color and sheet_data and creds:
+                cells = _find_leader_cells(sheet_data, name)
+                for r, c in cells:
+                    try:
+                        _update_cell_color(creds, r, c, color)
+                    except Exception:
+                        log.exception("Failed to update cell color for %s at (%d,%d)", name, r, c)
+
+            msg = (
+                f"\U0001f4ca PIPELINE UPDATE\n\n"
+                f"Leader: {name} \u2192 {new_stage}\n"
+                f"{reason}"
+            )
+            try:
+                post_to_slack(slack, config.SLACK_ONBOARDING_CHANNEL, msg)
+                log.info("Pipeline: %s moved to %s", name, new_stage)
+            except Exception:
+                log.exception("Failed to post pipeline update for %s", name)
+
+            messages.append(f"{name}: {current_stage} → {new_stage}")
+
+        state[pipeline_key] = True
+
+    return messages
 
 
 # ---------------------------------------------------------------------------
@@ -470,6 +690,30 @@ def main() -> None:
                         log.exception("Failed to post compliance alert")
         else:
             log.info("No new compliance alerts.")
+
+        # --- Init Google Sheets for Ops Hub color sync ---
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        gs_creds = ServiceCredentials.from_service_account_file(
+            config.GOOGLE_CREDENTIALS_PATH, scopes=scopes
+        )
+        gc = gspread.authorize(gs_creds)
+        spreadsheet = gc.open_by_key(config.GOOGLE_SHEET_ID)
+        sheet = _get_worksheet_by_gid(spreadsheet, config.SHEET_GID)
+        sheet_data = sheet.get_all_values()
+        log.info("Loaded %d rows from Ops Hub for color sync", len(sheet_data))
+
+        # --- Pipeline Auto-Advance ---
+        log.info("Checking pipeline transitions for %d leaders...", len(leaders))
+        transitions = advance_pipeline(
+            leaders, digest_state, slack,
+            dry_run=args.dry_run,
+            sheet_data=sheet_data,
+            creds=gs_creds,
+        )
+        if transitions:
+            log.info("Advanced %d leader(s) in pipeline: %s", len(transitions), "; ".join(transitions))
+        else:
+            log.info("No pipeline transitions.")
 
         if not args.dry_run:
             save_digest_state(digest_state)

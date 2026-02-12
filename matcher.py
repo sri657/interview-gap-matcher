@@ -215,6 +215,9 @@ def _classify_leader_cell(bg: dict, strike: bool) -> str:
     # Red bg: high red, low green, low blue — e.g. {red:1} = (1,0,0)
     if r > 0.7 and g < 0.4 and b < 0.4:
         return "red"
+    # Orange bg (= matched): high red, mid green (~0.5-0.7), very low blue
+    if r > 0.9 and 0.4 < g < 0.75 and b < 0.15:
+        return "orange"
     # Pink bg (= Scoot): high red, mid green, low blue — e.g. {red:1, green:0.6} = (1,0.6,0)
     if r > 0.9 and 0.3 < g < 0.8 and b < 0.2:
         return "scoot"
