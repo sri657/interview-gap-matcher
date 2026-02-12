@@ -7,3 +7,5 @@ notified.json
 onboarded.json
 matcher.log
 onboarding.log
+digest_state.json
+onboarding_digest.log

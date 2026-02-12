@@ -164,3 +164,24 @@ ONBOARDING_MENTION_EMAILS = [
     "mitzi.yap@kodely.io",
 ]
 ONBOARDED_PATH = os.path.join(os.path.dirname(__file__), "onboarded.json")
+
+# ---------------------------------------------------------------------------
+# Onboarding digest & compliance tracking
+# ---------------------------------------------------------------------------
+DIGEST_STATE_PATH = os.path.join(os.path.dirname(__file__), "digest_state.json")
+
+# Notion onboarding DB property names (exact names from schema)
+OB_COMPLIANCE_STATUS_PROPERTY = "Compliance Status"
+OB_SLACK_INVITE_PROPERTY = "Invite to Slack Sent- Philippines Team"
+OB_GUSTO_PROPERTY = "Added to Management Tool - Philippines Team"
+OB_WORKSHOP_SLACK_PROPERTY = "Added to Workshop Slack Channel- Philippines Team"
+OB_LESSON_PLAN_PROPERTY = "Lesson Plan Sent - Philippines Team"
+OB_ONBOARDING_EMAIL_PROPERTY = "Onboarding Email Sent?"
+OB_WORK_PERMIT_PROPERTY = "Work Permit Status"
+
+# Values that indicate a task is complete
+OB_DONE_VALUES = {"Done", "Yes", "Sent", "Approved", "Complete", "Completed", "Added", "Cleared"}
+
+# Urgency thresholds (days before start date)
+OB_URGENT_DAYS = 3
+OB_WARNING_DAYS = 7

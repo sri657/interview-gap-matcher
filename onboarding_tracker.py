@@ -274,6 +274,80 @@ def create_onboarding_page(
 
 
 # ---------------------------------------------------------------------------
+# Notion: create offboarding page
+# ---------------------------------------------------------------------------
+
+def create_offboarding_page(
+    leader_name: str,
+    region: str,
+    site: str,
+    start_date_str: str,
+) -> str | None:
+    """Create an offboarding page in the Notion onboarding DB with a checklist.
+
+    Returns the page URL or None. Skips if a page already exists.
+    """
+    existing = _find_existing_onboarding_page(leader_name)
+    if existing:
+        log.info("Notion page already exists for %s, skipping offboarding creation", leader_name)
+        return existing
+
+    start_date_iso = None
+    parsed = _parse_date(start_date_str)
+    if parsed:
+        start_date_iso = parsed.isoformat()
+
+    properties: dict = {
+        "": {"title": [{"text": {"content": leader_name}}]},
+        "Region": {"select": {"name": region}},
+        "Season": {"select": {"name": "Winter 2026"}},
+        "Readiness Status": {"select": {"name": "Offboarding Needed"}},
+        "School Teaching": {"multi_select": [{"name": site}]},
+        "Leader Type": {"select": {"name": "Leader"}},
+    }
+    if start_date_iso:
+        properties["Start Date"] = {"date": {"start": start_date_iso}}
+
+    # Offboarding checklist as Notion to_do blocks
+    checklist_items = [
+        "Remove from Gusto",
+        "Remove from Slack workspace",
+        "Remove LearnDash access",
+        "Remove from Workshop Slack channel",
+        "Notify team of departure",
+    ]
+    children = [
+        {
+            "object": "block",
+            "type": "to_do",
+            "to_do": {
+                "rich_text": [{"type": "text", "text": {"content": item}}],
+                "checked": False,
+            },
+        }
+        for item in checklist_items
+    ]
+
+    body = {
+        "parent": {"database_id": config.ONBOARDING_DB_ID},
+        "properties": properties,
+        "children": children,
+    }
+
+    resp = httpx.post(
+        f"{NOTION_BASE}/pages",
+        headers=NOTION_HEADERS,
+        json=body,
+        timeout=30,
+    )
+    if resp.status_code >= 400:
+        log.error("Notion API error %s: %s", resp.status_code, resp.text)
+    resp.raise_for_status()
+    page = resp.json()
+    return page.get("url")
+
+
+# ---------------------------------------------------------------------------
 # Slack alert builders
 # ---------------------------------------------------------------------------
 
@@ -329,16 +403,21 @@ def build_onboarding_alert(
     )
 
 
-def build_offboarding_alert(event: dict) -> str:
+def build_offboarding_alert(event: dict, notion_url: str | None = None) -> str:
     dates = _format_dates(event["start_date"], event["end_date"])
     dates_line = f"\n*Dates:* {dates}" if dates else ""
+
+    notion_line = ""
+    if notion_url:
+        notion_line = f"\n:white_check_mark: Notion offboarding ticket created \u2192 {notion_url}"
 
     return (
         f":red_circle: *LEADER BACKED OUT \u2014 RESTAFFING NEEDED*\n\n"
         f"*Leader:* {event['leader_name']}\n"
         f"*School:* {event['site']} ({event['region']})\n"
         f"*Program:* {event['lesson']} \u2014 {event['day']}s {event['time']}"
-        f"{dates_line}\n\n"
+        f"{dates_line}"
+        f"{notion_line}\n\n"
         f":warning: This is now a gap \u2014 check the gap match digest for replacement candidates."
     )
 
@@ -475,8 +554,27 @@ def main() -> None:
 
     # --- Process offboarding events ---
     for event in new_offboarding:
-        message = build_offboarding_alert(event)
+        notion_url = None
         slack_ok = False
+        if args.dry_run:
+            print("--- DRY RUN: NOTION OFFBOARDING PAGE ---")
+            print(f"  Would create offboarding page for: {event['leader_name']}")
+            print(f"  Region: {event['region']}, Site: {event['site']}")
+            print(f"  Start Date: {event['start_date']}")
+            print()
+        else:
+            try:
+                notion_url = create_offboarding_page(
+                    leader_name=event["leader_name"],
+                    region=event["region"],
+                    site=event["site"],
+                    start_date_str=event["start_date"],
+                )
+                log.info("Created Notion offboarding page for %s: %s", event["leader_name"], notion_url)
+            except Exception:
+                log.exception("Failed to create Notion offboarding page for %s", event["leader_name"])
+
+        message = build_offboarding_alert(event, notion_url)
         if args.dry_run:
             print("--- DRY RUN: SLACK #ops-offboarding ---")
             print(message)
