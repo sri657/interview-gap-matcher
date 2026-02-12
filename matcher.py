@@ -594,6 +594,59 @@ def find_matches(
 # Slack notification
 # ---------------------------------------------------------------------------
 
+
+def build_gap_summary(workshops: list[dict], num_candidates: int) -> str:
+    """Build a concise Slack summary of open gaps grouped by region."""
+    from collections import defaultdict
+
+    by_region: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for ws in workshops:
+        region = ws["region"] or "Unknown"
+        by_region[region][ws["site"]] += 1
+
+    today_str = date.today().strftime("%b %d, %Y")
+    total_gaps = len(workshops)
+    total_sites = sum(len(sites) for sites in by_region.values())
+    total_regions = len(by_region)
+
+    lines = [
+        f":clipboard: *Gap Summary — {today_str}*\n",
+        f"We have *{total_gaps} open leadership gaps* across {total_sites} sites "
+        f"in {total_regions} regions over the next 14 days:\n",
+    ]
+
+    # Sort regions by gap count descending
+    sorted_regions = sorted(by_region.items(), key=lambda x: sum(x[1].values()), reverse=True)
+
+    # Regions with 4+ gaps get their own block
+    major = [(r, s) for r, s in sorted_regions if sum(s.values()) >= 4]
+    minor = [(r, s) for r, s in sorted_regions if sum(s.values()) < 4]
+
+    for region, sites in major:
+        total = sum(sites.values())
+        site_names = sorted(sites.keys())
+        if len(site_names) > 6:
+            shown = ", ".join(site_names[:6])
+            site_str = f"{shown}, + {len(site_names) - 6} more"
+        else:
+            site_str = ", ".join(site_names)
+        lines.append(f"*{region}* — {total} gaps\n{site_str}\n")
+
+    # Minor regions on compact lines
+    if minor:
+        compact = " · ".join(
+            f"*{r}* — {sum(s.values())}" for r, s in minor
+        )
+        lines.append(compact + "\n")
+
+    lines.append(
+        f"{num_candidates} candidates match these gaps. "
+        f"Full details in the daily digest email & Gap Matches sheet tab."
+    )
+
+    return "\n".join(lines)
+
+
 def build_slack_message(candidate: dict, workshops: list[dict]) -> str:
     locations_str = ", ".join(candidate["locations"]) if candidate["locations"] else "(none)"
     email = candidate["email"] or "(no email on file)"
@@ -711,7 +764,7 @@ def main() -> None:
         log.info("No new matches found. Exiting.")
         return
 
-    # --- Dedup & notify ---
+    # --- Dedup & record ---
     notified = load_notified()
     new_notifications = 0
 
@@ -723,27 +776,25 @@ def main() -> None:
         if not unseen:
             continue
 
-        message = build_slack_message(candidate, unseen)
-
-        if args.dry_run:
-            print("--- DRY RUN ---")
-            print(message)
-            print()
-        else:
-            post_to_slack(slack, message)
-            log.info("Posted match for %s", candidate["name"])
-            time.sleep(1.2)  # stay under Slack's ~1 msg/sec rate limit
-
         now = datetime.now(timezone.utc).isoformat()
         for ws in unseen:
             notified[notified_key(candidate["id"], ws["workshop_key"])] = now
         new_notifications += 1
 
-        # Save after each post so progress isn't lost on crash
-        if not args.dry_run and new_notifications % 5 == 0:
-            save_notified(notified)
-
     save_notified(notified)
+
+    # --- Post concise gap summary to Slack ---
+    if new_notifications > 0:
+        summary = build_gap_summary(workshops, len(matches))
+        if args.dry_run:
+            print("--- DRY RUN (Slack summary) ---")
+            print(summary)
+            print()
+        else:
+            post_to_slack(slack, summary)
+            log.info("Posted gap summary to Slack (%d gaps, %d candidates)", len(workshops), len(matches))
+    else:
+        log.info("No new matches — skipping Slack summary.")
 
     # --- Update Gap Matches sheet tab ---
     if not args.dry_run:
@@ -753,7 +804,7 @@ def main() -> None:
             log.exception("Failed to write matches to Google Sheet tab")
 
     log.info(
-        "Done. %d new notification(s) sent%s.",
+        "Done. %d new match(es) recorded%s.",
         new_notifications,
         " (dry run)" if args.dry_run else "",
     )
