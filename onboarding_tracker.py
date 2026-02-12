@@ -234,7 +234,7 @@ def _update_returning_leader_page(
 ) -> str | None:
     """Update an existing Notion page for a returning leader.
 
-    Clears trainer assignment, sets status to Returning- Reactivate Gusto,
+    Clears trainer assignment, sets status to Returning Leader- Onboarding Needed,
     and updates school/region/start date for the new assignment.
     """
     start_date_iso = None
@@ -243,7 +243,7 @@ def _update_returning_leader_page(
         start_date_iso = parsed.isoformat()
 
     properties: dict = {
-        "Readiness Status": {"select": {"name": "Returning- Reactivate Gusto"}},
+        "Readiness Status": {"select": {"name": "Returning Leader- Onboarding Needed"}},
         "Trainer Assigned": {"select": None},
         "Region": {"select": {"name": region}},
         "School Teaching": {"multi_select": [{"name": site}]},
