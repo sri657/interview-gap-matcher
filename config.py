@@ -131,7 +131,8 @@ CANDIDATE_FRESHNESS_MONTHS = 6
 # ---------------------------------------------------------------------------
 # Email digest (SMTP)
 # ---------------------------------------------------------------------------
-EMAIL_TO = os.environ.get("EMAIL_TO", "talent@kodely.io")
+EMAIL_TO = os.environ.get("EMAIL_TO", "katherine@kodely.io,arissa@kodely.io,isabella.deeb@kodely.io,servando@kodely.io,jethro@kodely.io,mitzi.yap@kodely.io")
+EMAIL_CC = os.environ.get("EMAIL_CC", "sri@kodely.io")
 EMAIL_FROM = os.environ.get("EMAIL_FROM", "")
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
@@ -154,5 +155,12 @@ NOTIFIED_PATH = os.path.join(os.path.dirname(__file__), "notified.json")
 ONBOARDING_DB_ID = os.environ.get("ONBOARDING_DB_ID", "b8151685f6614222a40ea7e0ca237ba9")
 SLACK_ONBOARDING_CHANNEL = os.environ.get("SLACK_ONBOARDING_CHANNEL", "C09ES3F5ZCG")
 SLACK_OFFBOARDING_CHANNEL = os.environ.get("SLACK_OFFBOARDING_CHANNEL", "C09F3N91G69")
-ONBOARDING_MENTION_EMAILS = ["mitzi.yap@kodely.io", "jethro@kodely.io"]
+ONBOARDING_MENTION_EMAILS = [
+    "katherine@kodely.io",
+    "arissa@kodely.io",
+    "isabella.deeb@kodely.io",
+    "servando@kodely.io",
+    "jethro@kodely.io",
+    "mitzi.yap@kodely.io",
+]
 ONBOARDED_PATH = os.path.join(os.path.dirname(__file__), "onboarded.json")

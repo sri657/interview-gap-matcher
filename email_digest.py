@@ -649,19 +649,25 @@ def _build_html(
 
 def send_email(html: str, subject: str) -> None:
     """Send the digest email via SMTP."""
+    to_addrs = [a.strip() for a in config.EMAIL_TO.split(",") if a.strip()]
+    cc_addrs = [a.strip() for a in getattr(config, "EMAIL_CC", "").split(",") if a.strip()]
+    all_recipients = to_addrs + cc_addrs
+
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = config.EMAIL_FROM
-    msg["To"] = config.EMAIL_TO
+    msg["To"] = ", ".join(to_addrs)
+    if cc_addrs:
+        msg["Cc"] = ", ".join(cc_addrs)
     msg.attach(MIMEText(html, "html"))
 
     context = ssl.create_default_context(cafile=certifi.where())
     with smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT, timeout=30) as server:
         server.starttls(context=context)
         server.login(config.SMTP_USER, config.SMTP_PASSWORD)
-        server.sendmail(config.EMAIL_FROM, [config.EMAIL_TO], msg.as_string())
+        server.sendmail(config.EMAIL_FROM, all_recipients, msg.as_string())
 
-    log.info("Digest email sent to %s", config.EMAIL_TO)
+    log.info("Digest email sent to %s (cc: %s)", ", ".join(to_addrs), ", ".join(cc_addrs) or "none")
 
 
 # ---------------------------------------------------------------------------
