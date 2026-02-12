@@ -1,0 +1,82 @@
+{
+  "0144e56b-8166-40a9-9df1-f3d5bb728e7c": {
+    "approved_notified": true,
+    "last_status": "Cleared"
+  },
+  "305fc18c-f852-8106-a851-dec9c18ef659": {
+    "last_status": "Not Sent"
+  },
+  "305fc18c-f852-8126-bd24-ed1d09074ebc": {
+    "urgent_notified": true,
+    "last_status": "Not Sent"
+  },
+  "305fc18c-f852-8138-ab40-f11f49ebbdcf": {
+    "last_status": "Not Sent"
+  },
+  "305fc18c-f852-8154-b310-c62130855bb0": {
+    "last_status": "Not Sent"
+  },
+  "305fc18c-f852-8167-a514-ec0bdf6a8d2a": {
+    "urgent_notified": true,
+    "last_status": "Not Sent"
+  },
+  "305fc18c-f852-8181-b1bc-c387a4605765": {
+    "last_status": "Not Sent"
+  },
+  "305fc18c-f852-81db-9a60-d99dde732f43": {
+    "urgent_notified": true,
+    "last_status": "Not Sent"
+  },
+  "305fc18c-f852-81e8-b8dc-c7cee3643cb7": {
+    "last_status": "Done",
+    "approved_notified": true
+  },
+  "305fc18c-f852-81ef-9c10-db61a4289393": {
+    "last_status": "Not Sent"
+  },
+  "304fc18c-f852-80f6-b203-f1d5d2798148": {
+    "urgent_notified": true,
+    "last_status": "In Progress"
+  },
+  "305fc18c-f852-8031-8b1c-d9891eea4093": {
+    "approved_notified": true,
+    "last_status": "Done",
+    "warning_notified": true
+  },
+  "305fc18c-f852-81e3-b5fe-e0951b7cb97e": {
+    "approved_notified": true,
+    "last_status": "Done"
+  },
+  "pipeline_0144e56b-8166-40a9-9df1-f3d5bb728e7c_Training Pending": true,
+  "2fdfc18c-f852-8085-a31a-c7d48f1ce68d": {
+    "approved_notified": true,
+    "last_status": "Done"
+  },
+  "2fffc18c-f852-8062-9584-e28888877240": {
+    "approved_notified": true,
+    "last_status": "Done"
+  },
+  "302fc18c-f852-8094-ba9e-fe7314f9257c": {
+    "urgent_notified": true,
+    "last_status": "Pending"
+  },
+  "1ec261fe-14ea-48be-a5a8-c60dd8255c4d": {
+    "approved_notified": true,
+    "last_status": "Done"
+  },
+  "305fc18c-f852-8132-a91e-d10c2014c500": {
+    "last_status": "Not Sent"
+  },
+  "305fc18c-f852-818c-a7c4-ff50e1151a64": {
+    "last_status": "Not Sent"
+  },
+  "pipeline_1ec261fe-14ea-48be-a5a8-c60dd8255c4d_Onboarding Setup": true,
+  "pipeline_1ec261fe-14ea-48be-a5a8-c60dd8255c4d_Training In Progress": true,
+  "305fc18c-f852-8192-bc6d-ee3a8549bb08": {
+    "last_status": "Not Sent"
+  },
+  "305fc18c-f852-81e7-98b6-e8de89d02974": {
+    "last_status": "Not Sent"
+  },
+  "pipeline_305fc18c-f852-8031-8b1c-d9891eea4093_Training In Progress": true
+}
