@@ -289,13 +289,13 @@ _STAGE_COLOR_MAP = {
 
 
 def _find_leader_cells(sheet_data: list[list[str]], leader_name: str) -> list[tuple[int, int]]:
-    """Search columns T(19), U(20), V(21) for exact name match.
+    """Search columns S(18), T(19), U(20) for exact name match.
 
     Returns list of (row_index, col_index) tuples (0-based).
     """
     matches = []
     for row_idx, row in enumerate(sheet_data):
-        for col_idx in (19, 20, 21):  # T, U, V columns
+        for col_idx in (18, 19, 20):  # S, T, U columns (Leader 1, Leader 2, Leader 3)
             if col_idx < len(row) and row[col_idx].strip() == leader_name:
                 matches.append((row_idx, col_idx))
     return matches

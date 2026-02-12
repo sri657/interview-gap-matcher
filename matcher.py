@@ -262,7 +262,7 @@ def _fetch_leader_formatting(creds: ServiceCredentials, total_rows: int) -> dict
     batch_size = 500
     for start in range(2, total_rows + 2, batch_size):
         end = min(start + batch_size - 1, total_rows + 1)
-        range_str = f"Winter/Spring 26!T{start}:V{end}"
+        range_str = f"Winter/Spring 26!S{start}:U{end}"
         url = f"https://sheets.googleapis.com/v4/spreadsheets/{config.GOOGLE_SHEET_ID}"
         params = {
             "ranges": range_str,
