@@ -187,16 +187,19 @@ def _parse_date(date_str: str) -> date | None:
 def _classify_leader_cell(bg: dict, strike: bool) -> str:
     """Classify a leader cell by its background color and strikethrough.
 
-    Returns one of:
-      'pink'       — tentative (interview only)
-      'red'        — backout / dropped leader
-      'scoot'      — 3rd-party agency (cyan bg)
-      'strikethrough' — struck-through name (backout)
-      'normal'     — confirmed / no special status
+    Ops Hub color coding:
+      Red    = backed out, needs restaffing          → 'red'       (GAP)
+      Pink   = Scoot / 3rd-party agency              → 'scoot'     (GAP)
+      Yellow = interviewing                          → 'yellow'    (not a gap)
+      Green  = onboarding in progress                → 'green'     (not a gap)
+      Purple = compliance                            → 'purple'    (not a gap)
+      Grey   = cancelled                             → 'gray'      (excluded)
+      Strikethrough = backed out                     → 'strikethrough' (GAP)
+      White  = confirmed / normal                    → 'normal'    (not a gap)
     """
     # Google Sheets API omits color channels that are 0
     # e.g. pure red = {"red": 1}, pink = {"red": 1, "green": 0.6},
-    #      cyan = {"red": 0.6, "blue": 1}, white = {"red": 1, "green": 1, "blue": 1}
+    #      purple = {"red": 0.6, "blue": 1}, white = {"red": 1, "green": 1, "blue": 1}
     r = bg.get("red", 0.0)
     g = bg.get("green", 0.0)
     b = bg.get("blue", 0.0)
@@ -206,18 +209,24 @@ def _classify_leader_cell(bg: dict, strike: bool) -> str:
     # Strikethrough = backout
     if strike:
         return "strikethrough"
-    # Gray bg (e.g. 0.4-0.72 uniform RGB) = cancelled / excluded
+    # Gray bg (uniform 0.4-0.75) = cancelled / excluded
     if r < 0.75 and g < 0.75 and b < 0.75 and abs(r - g) < 0.05 and abs(g - b) < 0.05:
         return "gray"
     # Red bg: high red, low green, low blue — e.g. {red:1} = (1,0,0)
     if r > 0.7 and g < 0.4 and b < 0.4:
         return "red"
-    # Pink bg: high red, mid green, low blue — e.g. {red:1, green:0.6} = (1,0.6,0)
+    # Pink bg (= Scoot): high red, mid green, low blue — e.g. {red:1, green:0.6} = (1,0.6,0)
     if r > 0.9 and 0.3 < g < 0.8 and b < 0.2:
-        return "pink"
-    # Cyan bg: mid red, low green, high blue — e.g. {red:0.6, blue:1} = (0.6,0,1)
-    if 0.3 < r < 0.8 and g < 0.2 and b > 0.9:
         return "scoot"
+    # Yellow bg (= interviewing): high red, high green, low blue
+    if r > 0.8 and g > 0.8 and b < 0.4:
+        return "yellow"
+    # Green bg (= onboarding): green dominant
+    if g > 0.6 and g > r and g > b:
+        return "green"
+    # Purple bg (= compliance): mid-high red, low green, high blue — e.g. {red:0.6, blue:1}
+    if b > 0.5 and r > 0.3 and g < 0.5 and b > g:
+        return "purple"
     return "normal"
 
 
@@ -301,7 +310,7 @@ def get_gap_workshops(gc: gspread.Client, creds: ServiceCredentials) -> list[dic
     fmt_map = _fetch_leader_formatting(creds, len(records))
 
     # Gap-indicating cell classes
-    GAP_CLASSES = {"pink", "red", "scoot", "strikethrough"}
+    GAP_CLASSES = {"red", "scoot", "strikethrough"}
 
     today = date.today()
     gaps = []
@@ -333,8 +342,11 @@ def get_gap_workshops(gc: gspread.Client, creds: ServiceCredentials) -> list[dic
         cell_classes = fmt_map.get(idx, ["normal", "normal", "normal"])
         leaders = [leader1, leader2, leader3]
 
-        # Gray = cancelled position — ignore those leaders entirely
-        # If ALL filled leaders are gray, the whole row is cancelled
+        # Non-gap statuses: gray (cancelled), yellow (interviewing),
+        # green (onboarding), purple (compliance), normal (confirmed)
+        SKIP_CLASSES = {"gray", "yellow", "green", "purple", "normal"}
+
+        # If ALL filled leaders are grey/cancelled, skip the entire row
         non_gray_leaders = [
             (leader, cls) for leader, cls in zip(leaders, cell_classes)
             if leader and cls != "gray"
@@ -343,29 +355,25 @@ def get_gap_workshops(gc: gspread.Client, creds: ServiceCredentials) -> list[dic
         if gray_count > 0 and not non_gray_leaders:
             continue  # all filled positions are cancelled — skip row
 
-        # Determine gap type from non-gray cell classifications
+        # Determine gap type — only red, scoot (pink), and strikethrough are gaps
         all_empty = all(not leader or cls == "gray" for leader, cls in zip(leaders, cell_classes))
         gap_names: dict[str, list[str]] = {
-            "tentative": [],   # pink
             "backout": [],     # red, strikethrough
-            "3rd_party": [],   # scoot (cyan)
+            "3rd_party": [],   # scoot (pink in Ops Hub)
         }
         has_gap_cell = False
 
         for leader, cls in zip(leaders, cell_classes):
-            if not leader or cls == "gray":
+            if not leader or cls in SKIP_CLASSES:
                 continue
-            if cls == "pink":
-                gap_names["tentative"].append(leader)
-                has_gap_cell = True
-            elif cls in ("red", "strikethrough"):
+            if cls in ("red", "strikethrough"):
                 gap_names["backout"].append(leader)
                 has_gap_cell = True
             elif cls == "scoot":
                 gap_names["3rd_party"].append(leader)
                 has_gap_cell = True
 
-        # A row is a gap if: all leaders empty/grey, OR any leader cell is flagged
+        # A row is a gap if: all leaders empty/grey, OR any leader is red/scoot/strikethrough
         if not all_empty and not has_gap_cell:
             continue
 
@@ -383,14 +391,10 @@ def get_gap_workshops(gc: gspread.Client, creds: ServiceCredentials) -> list[dic
         elif gap_names["3rd_party"]:
             gap_type = "3RD PARTY (Scoot)"
         else:
-            gap_type = "TENTATIVE (interview only)"
+            gap_type = "OPEN (no leaders)"
 
         # Collect all flagged names
-        tentative_names = (
-            gap_names["tentative"]
-            + gap_names["backout"]
-            + gap_names["3rd_party"]
-        )
+        flagged_names = gap_names["backout"] + gap_names["3rd_party"]
 
         district = row.get(config.SHEET_DISTRICT_COL, "").strip()
         zone = row.get(config.SHEET_ZONE_COL, "").strip()
@@ -408,7 +412,7 @@ def get_gap_workshops(gc: gspread.Client, creds: ServiceCredentials) -> list[dic
             "start_date": start_date_str,
             "end_date": end_date_str,
             "gap_type": gap_type,
-            "tentative_names": tentative_names,
+            "tentative_names": flagged_names,
             "workshop_key": f"{region}|{site}|{lesson}|{day}|{time_str}",
             "district": district,
             "zone": zone,

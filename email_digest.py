@@ -49,7 +49,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _urgency_key(ws: dict) -> tuple:
-    """Sort key: OPEN > BACKOUT > 3RD PARTY > TENTATIVE, then by earliest start date."""
+    """Sort key: OPEN > BACKOUT > 3RD PARTY, then by earliest start date."""
     gt = ws["gap_type"]
     if "OPEN" in gt:
         type_rank = 0
@@ -507,31 +507,128 @@ def _build_html(
     {heat_line}
   </div>
 
+  <!-- HOW TO READ THIS EMAIL -->
+  <div style="background:#f5f5f5;border:2px solid #bdbdbd;border-radius:8px;padding:16px;margin-bottom:24px">
+    <h2 style="margin:0 0 12px;color:#333;font-size:16px">HOW TO READ THIS EMAIL</h2>
+
+    <h3 style="margin:10px 0 6px;color:#555;font-size:14px">Ops Hub Color Coding (Leader columns)</h3>
+    <table style="border-collapse:collapse;width:100%;font-size:13px;margin-bottom:12px">
+      <tr style="background:#ffebee">
+        <td style="padding:6px 10px;border:1px solid #ddd;width:50px"><span style="display:inline-block;width:20px;height:20px;background:#c62828;border-radius:3px"></span></td>
+        <td style="padding:6px 10px;border:1px solid #ddd;width:120px"><b>Red</b></td>
+        <td style="padding:6px 10px;border:1px solid #ddd">Backed out &mdash; needs restaffing. Shows as <span style="color:#b71c1c;font-weight:bold">BACKOUT</span> in this digest.</td>
+      </tr>
+      <tr style="background:#ffebee">
+        <td style="padding:6px 10px;border:1px solid #ddd"><span style="display:inline-block;width:20px;height:3px;background:#333;margin-top:8px;text-decoration:line-through"></span></td>
+        <td style="padding:6px 10px;border:1px solid #ddd"><b><span style="text-decoration:line-through">Strikethrough</span></b></td>
+        <td style="padding:6px 10px;border:1px solid #ddd">Also backed out. Shows as <span style="color:#b71c1c;font-weight:bold">BACKOUT</span> in this digest.</td>
+      </tr>
+      <tr style="background:#fce4ec">
+        <td style="padding:6px 10px;border:1px solid #ddd"><span style="display:inline-block;width:20px;height:20px;background:#f48fb1;border-radius:3px"></span></td>
+        <td style="padding:6px 10px;border:1px solid #ddd"><b>Pink</b></td>
+        <td style="padding:6px 10px;border:1px solid #ddd">Scoot (3rd-party agency). We want to replace with a Kodely leader. Shows as <span style="color:#00838f;font-weight:bold">3RD PARTY (Scoot)</span>.</td>
+      </tr>
+      <tr style="background:#fffde7">
+        <td style="padding:6px 10px;border:1px solid #ddd"><span style="display:inline-block;width:20px;height:20px;background:#fff176;border-radius:3px"></span></td>
+        <td style="padding:6px 10px;border:1px solid #ddd"><b>Yellow</b></td>
+        <td style="padding:6px 10px;border:1px solid #ddd">Interviewing &mdash; <b>NOT a gap</b>. Candidate is being screened.</td>
+      </tr>
+      <tr style="background:#e8f5e9">
+        <td style="padding:6px 10px;border:1px solid #ddd"><span style="display:inline-block;width:20px;height:20px;background:#81c784;border-radius:3px"></span></td>
+        <td style="padding:6px 10px;border:1px solid #ddd"><b>Green</b></td>
+        <td style="padding:6px 10px;border:1px solid #ddd">Onboarding in progress &mdash; <b>NOT a gap</b>. Leader is being set up.</td>
+      </tr>
+      <tr style="background:#f3e5f5">
+        <td style="padding:6px 10px;border:1px solid #ddd"><span style="display:inline-block;width:20px;height:20px;background:#ab47bc;border-radius:3px"></span></td>
+        <td style="padding:6px 10px;border:1px solid #ddd"><b>Purple</b></td>
+        <td style="padding:6px 10px;border:1px solid #ddd">Compliance &mdash; <b>NOT a gap</b>. Background check / paperwork in progress.</td>
+      </tr>
+      <tr style="background:#f5f5f5">
+        <td style="padding:6px 10px;border:1px solid #ddd"><span style="display:inline-block;width:20px;height:20px;background:#9e9e9e;border-radius:3px"></span></td>
+        <td style="padding:6px 10px;border:1px solid #ddd"><b>Grey</b></td>
+        <td style="padding:6px 10px;border:1px solid #ddd">Cancelled &mdash; entire row is <b>excluded</b> from this digest.</td>
+      </tr>
+      <tr>
+        <td style="padding:6px 10px;border:1px solid #ddd"><span style="display:inline-block;width:20px;height:20px;background:#fff;border:1px solid #ddd;border-radius:3px"></span></td>
+        <td style="padding:6px 10px;border:1px solid #ddd"><b>White (no color)</b></td>
+        <td style="padding:6px 10px;border:1px solid #ddd">Confirmed leader &mdash; <b>NOT a gap</b>.</td>
+      </tr>
+    </table>
+
+    <h3 style="margin:10px 0 6px;color:#555;font-size:14px">Gap Types in This Digest</h3>
+    <table style="border-collapse:collapse;width:100%;font-size:13px;margin-bottom:12px">
+      <tr>
+        <td style="padding:6px 10px;border:1px solid #ddd;width:180px"><span style="color:#c0392b;font-weight:bold">OPEN (no leaders)</span></td>
+        <td style="padding:6px 10px;border:1px solid #ddd">All leader columns are empty. No one is assigned. <b>Highest urgency.</b></td>
+      </tr>
+      <tr>
+        <td style="padding:6px 10px;border:1px solid #ddd"><span style="color:#b71c1c;font-weight:bold">BACKOUT</span></td>
+        <td style="padding:6px 10px;border:1px solid #ddd">Leader backed out (red cell or strikethrough). Needs immediate replacement.</td>
+      </tr>
+      <tr>
+        <td style="padding:6px 10px;border:1px solid #ddd"><span style="color:#00838f;font-weight:bold">3RD PARTY (Scoot)</span></td>
+        <td style="padding:6px 10px;border:1px solid #ddd">Staffed by Scoot agency (pink cell). Replace with a Kodely leader.</td>
+      </tr>
+    </table>
+
+    <h3 style="margin:10px 0 6px;color:#555;font-size:14px">Candidate Sources</h3>
+    <table style="border-collapse:collapse;width:100%;font-size:13px;margin-bottom:12px">
+      <tr>
+        <td style="padding:6px 10px;border:1px solid #ddd;width:180px"><span style="background:#e8f5e9;color:#2e7d32;padding:2px 6px;border-radius:3px;font-weight:bold">FORM</span></td>
+        <td style="padding:6px 10px;border:1px solid #ddd">Applied via the Leader Confirmation Form. Date = when they submitted the form. These are people who already want to work with us.</td>
+      </tr>
+      <tr>
+        <td style="padding:6px 10px;border:1px solid #ddd"><span style="background:#e3f2fd;color:#1565c0;padding:2px 6px;border-radius:3px;font-weight:bold">NOTION</span></td>
+        <td style="padding:6px 10px;border:1px solid #ddd">In our Notion pipeline (Team Screening, Talent Screen, or Teaching Demo stage). Date = when their Notion card was created.</td>
+      </tr>
+    </table>
+
+    <h3 style="margin:10px 0 6px;color:#555;font-size:14px">Sections in This Email</h3>
+    <ol style="font-size:13px;line-height:1.8;margin:0;padding-left:20px">
+      <li><b>Gap Tables</b> &mdash; Every gap sorted by urgency. Shows the school, workshop details, gap type, and matched candidates. Scroll through to see what needs staffing.</li>
+      <li><b>Candidate Roster</b> &mdash; Full list of every matched candidate with their email, status, available days, and date. Use this to quickly copy emails.</li>
+      <li><b>Action Checklist</b> &mdash; For each gap, a step-by-step to-do list with ready-to-copy-paste email templates. Click the arrows to expand each template, copy the text, and send.</li>
+    </ol>
+  </div>
+
   {no_match_note}
 
   <!-- SECTION 1: Gap Tables by Region -->
+  <h1 style="color:#4a90d9;border-bottom:3px solid #4a90d9;padding-bottom:6px">
+    Section 1: All Gaps by Region
+  </h1>
+  <p style="color:#666;font-size:13px;margin-bottom:16px">
+    Regions with the most gaps appear first. Within each region, gaps are sorted by urgency:
+    OPEN &rarr; BACKOUT &rarr; 3RD PARTY (Scoot), then by earliest start date.
+  </p>
   {regions_html}
 
   <!-- SECTION 2: Full Candidate Roster -->
-  <h2 style="color:#455a64;border-bottom:2px solid #607d8b;padding-bottom:4px;margin-top:40px">
-    All Matched Candidates by Region
-  </h2>
+  <h1 style="color:#455a64;border-bottom:3px solid #607d8b;padding-bottom:6px;margin-top:40px">
+    Section 2: All Matched Candidates
+  </h1>
   <p style="color:#666;font-size:13px">
-    Complete list of all candidates. <b style="background:#e8f5e9;color:#2e7d32;padding:1px 5px;border-radius:3px">FORM</b> = leader confirmation form.
-    <b style="background:#e3f2fd;color:#1565c0;padding:1px 5px;border-radius:3px">NOTION</b> = pipeline candidate.
+    Every candidate who matches at least one gap. <b style="background:#e8f5e9;color:#2e7d32;padding:1px 5px;border-radius:3px">FORM</b> = submitted the leader confirmation form.
+    <b style="background:#e3f2fd;color:#1565c0;padding:1px 5px;border-radius:3px">NOTION</b> = in our Notion hiring pipeline.
+    Only candidates active within the last 6 months are included.
   </p>
   {roster_html}
 
   <!-- SECTION 3: Per-Gap Action Checklist with Templates -->
   <h1 style="color:#c0392b;margin-top:48px;border-bottom:3px solid #c0392b;padding-bottom:6px">
-    Action Checklist &amp; Ready-to-Send Templates
+    Section 3: Action Checklist &amp; Ready-to-Send Templates
   </h1>
   <p style="color:#666;margin-bottom:8px">
-    For each gap below: expand the templates, copy-paste, and send. Follow the steps in order.
+    For each gap below there are <b>3 ready-made email templates</b>. Click the arrow to expand,
+    select all the text, copy it, and paste it into your email.
   </p>
-  <div style="background:#ffebee;padding:10px 16px;border-radius:6px;margin-bottom:24px;font-size:13px">
-    <b>Workflow:</b> 1) Email FORM leaders first &rarr; 2) Email NOTION candidates &rarr;
-    3) Post Handshake campaign at 9 PM, follow up next day &rarr; 4) BCC mass email &rarr; 5) Confirm placements
+  <div style="background:#ffebee;padding:14px 16px;border-radius:6px;margin-bottom:24px;font-size:13px;line-height:1.8">
+    <b>FOLLOW THESE STEPS IN ORDER FOR EACH GAP:</b><br>
+    <b>Step 1:</b> Email <span style="background:#e8f5e9;color:#2e7d32;padding:1px 5px;border-radius:3px;font-weight:bold">FORM</span> candidates first &mdash; they already applied, fastest to place<br>
+    <b>Step 2:</b> Email <span style="background:#e3f2fd;color:#1565c0;padding:1px 5px;border-radius:3px;font-weight:bold">NOTION</span> pipeline candidates &mdash; they're in our hiring process<br>
+    <b>Step 3:</b> Post the <b>Handshake campaign</b> at <b>9 PM</b>. Follow up the <b>next day</b><br>
+    <b>Step 4:</b> Send the <b>BCC mass email</b> to the broader candidate list<br>
+    <b>Step 5:</b> Check responses, schedule interviews, confirm placements
   </div>
   {checklist_html}
 
@@ -539,6 +636,8 @@ def _build_html(
   <p style="font-size:12px;color:#999">
     Automated digest from the Interview Gap Matcher.
     Matches are based on candidate location, pipeline stage, and day availability.
+    Only candidates active within the last 6 months are included.
+    Grey-highlighted and cancelled rows from the Ops Hub are excluded.
   </p>
 </body>
 </html>"""
