@@ -4,4 +4,5 @@ __pycache__/
 *.pyc
 service-account.json
 notified.json
+onboarded.json
 matcher.log
