@@ -84,7 +84,49 @@ LOCATION_ALIASES = {
     "downtown chicago": "chicago",
     "naperville": "chicago",
     "marin": "marin county",
+    # Form Responses free-text locations
+    "los angeles, pasadena": "la",
+    "los angeles": "la",
+    "brooklyn": "brooklyn",
+    "brooklyn, manhattan": "manhattan",
+    "brooklyn, queens": "brooklyn",
+    "brooklyn, queens, manhattan": "manhattan",
+    "brooklyn, queens, the bronx, manhattan": "manhattan",
+    "brooklyn, the bronx, manhattan": "manhattan",
+    "brooklyn, staten island": "brooklyn",
+    "dc/ maryland": "dc/maryland",
+    "dc/maryland": "dc/maryland",
+    "denver, boulder": "colorado",
+    "denver, boulder, colorado": "colorado",
+    "austin": "austin",
+    "seaside ca": "sf",
+    "san jose": "san jose",
+    "virginia, dc/ maryland": "dc/maryland",
+    "detroit, mi": "detroit",
+    "chicago, il": "chicago",
+    "chicago, illinois": "chicago",
+    "boston": "boston",
 }
+
+# ---------------------------------------------------------------------------
+# Google Sheet — Leader Confirmation Form Responses
+# ---------------------------------------------------------------------------
+FORM_SHEET_ID = os.environ.get(
+    "FORM_SHEET_ID", "1F5-rT1K-2mUiAfXCo7batPC0opMp5Ol0jMz1XGMhoRg"
+)
+FORM_SHEET_GID = int(os.environ.get("FORM_SHEET_GID", "638672440"))
+
+# Column headers in the Form Responses sheet
+FORM_NAME_COL = "What is your full legal name (as it appears on your government-issued ID and background check)?\" (Please ensure this matches your official documents exactly, even if you use a different preferred name.)"
+FORM_EMAIL_COL = "Email (Please only enter a personal gmail account)"
+FORM_DAYS_COL = "Please share the days you're available for a 1-hour slot between 2:30–5:00 pm (you do not need to be available for the entire window)."
+FORM_LOCATION_COL = "Location interested in"
+FORM_DATE_COL = "Date"
+FORM_STATUS_COL = "Active Status"
+FORM_RETURNING_COL = "Are you a returning Kodely Leader?"
+
+# How far back to consider candidates (months)
+CANDIDATE_FRESHNESS_MONTHS = 6
 
 # ---------------------------------------------------------------------------
 # Email digest (SMTP)

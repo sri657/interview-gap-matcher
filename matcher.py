@@ -13,7 +13,7 @@ import logging
 import os
 import ssl
 import time
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 from urllib.parse import quote
 
 import certifi
@@ -100,7 +100,19 @@ def get_matchable_candidates() -> list[dict]:
         resp.raise_for_status()
         data = resp.json()
 
+        cutoff = datetime.now(timezone.utc) - timedelta(days=config.CANDIDATE_FRESHNESS_MONTHS * 30)
+
         for page in data.get("results", []):
+            # Skip candidates whose Notion card is older than the freshness window
+            created = page.get("created_time", "")
+            if created:
+                try:
+                    created_dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                    if created_dt < cutoff:
+                        continue
+                except ValueError:
+                    pass
+
             props = page.get("properties", {})
 
             name = _extract_title(props.get(config.NOTION_NAME_PROPERTY, {}))
@@ -123,6 +135,7 @@ def get_matchable_candidates() -> list[dict]:
                 "status": status,
                 "locations": locations,
                 "email": email,
+                "source": "notion",
             })
 
         if not data.get("has_more"):
@@ -160,8 +173,40 @@ def _parse_date(date_str: str) -> date | None:
     return None
 
 
+def _classify_leader_cell(bg: dict, strike: bool) -> str:
+    """Classify a leader cell by its background color and strikethrough.
+
+    Returns one of:
+      'pink'       — tentative (interview only)
+      'red'        — backout / dropped leader
+      'scoot'      — 3rd-party agency (cyan bg)
+      'strikethrough' — struck-through name (backout)
+      'normal'     — confirmed / no special status
+    """
+    r = bg.get("red", 1.0)
+    g = bg.get("green", 1.0)
+    b = bg.get("blue", 1.0)
+
+    # Strikethrough (gray bg + struck text) = backout
+    if strike:
+        return "strikethrough"
+    # Pink bg (1, 0.6, 1) = tentative
+    if r > 0.9 and g < 0.7 and b > 0.9:
+        return "pink"
+    # Cyan bg (0.6, 1, 1) = Scoot / 3rd-party agency
+    if r < 0.7 and g > 0.9 and b > 0.9:
+        return "scoot"
+    # Red bg = backout (high red, low green, low blue)
+    if r > 0.7 and g < 0.4 and b < 0.4:
+        return "red"
+    # Dark gray without strike (e.g. WESTSIDE STAFFING) = 3rd-party
+    if r < 0.65 and g < 0.65 and b < 0.65 and abs(r - g) < 0.05 and abs(g - b) < 0.05:
+        return "scoot"
+    return "normal"
+
+
 def _is_pink(bg: dict) -> bool:
-    """Check if a cell background is the pink/purple tentative color."""
+    """Legacy helper — check if a cell background is the pink tentative color."""
     r = bg.get("red", 1.0)
     g = bg.get("green", 1.0)
     b = bg.get("blue", 1.0)
@@ -175,9 +220,13 @@ def _get_worksheet_by_gid(spreadsheet: gspread.Spreadsheet, gid: int) -> gspread
     raise ValueError(f"No worksheet found with gid={gid}")
 
 
-def _fetch_leader_formatting(creds: ServiceCredentials, total_rows: int) -> dict[int, list[bool]]:
-    """Fetch background colors for Leader 1/2/3 columns (T, U, V) and return
-    a dict mapping row_index (0-based data row) -> [l1_pink, l2_pink, l3_pink]."""
+def _fetch_leader_formatting(creds: ServiceCredentials, total_rows: int) -> dict[int, list[str]]:
+    """Fetch background colors and strikethrough for Leader 1/2/3 columns (T, U, V).
+
+    Returns a dict mapping row_index (0-based data row) -> [l1_class, l2_class, l3_class]
+    where each class is one of: 'pink', 'red', 'scoot', 'strikethrough', 'normal'.
+    Only rows with at least one non-normal cell are included.
+    """
     creds_copy = creds.with_scopes(["https://www.googleapis.com/auth/spreadsheets.readonly"])
     creds_copy.refresh(google.auth.transport.requests.Request())
 
@@ -189,7 +238,7 @@ def _fetch_leader_formatting(creds: ServiceCredentials, total_rows: int) -> dict
         url = f"https://sheets.googleapis.com/v4/spreadsheets/{config.GOOGLE_SHEET_ID}"
         params = {
             "ranges": range_str,
-            "fields": "sheets.data.rowData.values.effectiveFormat.backgroundColor",
+            "fields": "sheets.data.rowData.values.effectiveFormat(backgroundColor,textFormat.strikethrough)",
         }
         headers = {"Authorization": f"Bearer {creds_copy.token}"}
         resp = httpx.get(url, headers=headers, params=params, timeout=60)
@@ -198,15 +247,17 @@ def _fetch_leader_formatting(creds: ServiceCredentials, total_rows: int) -> dict
         rows = data.get("sheets", [{}])[0].get("data", [{}])[0].get("rowData", [])
         for i, row in enumerate(rows):
             cells = row.get("values", [])
-            pinks = []
+            classes = []
             for j in range(3):
                 if j < len(cells):
-                    bg = cells[j].get("effectiveFormat", {}).get("backgroundColor", {})
-                    pinks.append(_is_pink(bg))
+                    fmt = cells[j].get("effectiveFormat", {})
+                    bg = fmt.get("backgroundColor", {})
+                    strike = fmt.get("textFormat", {}).get("strikethrough", False)
+                    classes.append(_classify_leader_cell(bg, strike))
                 else:
-                    pinks.append(False)
-            if any(pinks):
-                result[start - 2 + i] = pinks  # 0-based data row index
+                    classes.append("normal")
+            if any(c != "normal" for c in classes):
+                result[start - 2 + i] = classes
 
     return result
 
@@ -229,9 +280,12 @@ def get_gap_workshops(gc: gspread.Client, creds: ServiceCredentials) -> list[dic
     for row in all_rows[1:]:
         records.append({headers[j]: (row[i] if i < len(row) else "") for j, i in enumerate(valid_cols)})
 
-    # Fetch leader column formatting for tentative detection
+    # Fetch leader column formatting for gap detection
     log.info("Fetching leader column formatting for %d rows...", len(records))
-    pink_map = _fetch_leader_formatting(creds, len(records))
+    fmt_map = _fetch_leader_formatting(creds, len(records))
+
+    # Gap-indicating cell classes
+    GAP_CLASSES = {"pink", "red", "scoot", "strikethrough"}
 
     today = date.today()
     gaps = []
@@ -259,25 +313,34 @@ def get_gap_workshops(gc: gspread.Client, creds: ServiceCredentials) -> list[dic
         leader2 = row.get(config.SHEET_LEADER_2_COL, "").strip()
         leader3 = row.get(config.SHEET_LEADER_3_COL, "").strip()
 
-        # Check pink/tentative status for this row
-        pinks = pink_map.get(idx, [False, False, False])
+        # Classify each leader cell
+        cell_classes = fmt_map.get(idx, ["normal", "normal", "normal"])
+        leaders = [leader1, leader2, leader3]
 
-        # Determine gap type
+        # Determine gap type from cell classifications
         all_empty = not leader1 and not leader2 and not leader3
-        has_tentative = False
-        tentative_names = []
+        gap_names: dict[str, list[str]] = {
+            "tentative": [],   # pink
+            "backout": [],     # red, strikethrough
+            "3rd_party": [],   # scoot, gray
+        }
+        has_gap_cell = False
 
-        if pinks[0] and leader1:
-            has_tentative = True
-            tentative_names.append(leader1)
-        if pinks[1] and leader2:
-            has_tentative = True
-            tentative_names.append(leader2)
-        if pinks[2] and leader3:
-            has_tentative = True
-            tentative_names.append(leader3)
+        for leader, cls in zip(leaders, cell_classes):
+            if not leader:
+                continue
+            if cls == "pink":
+                gap_names["tentative"].append(leader)
+                has_gap_cell = True
+            elif cls in ("red", "strikethrough"):
+                gap_names["backout"].append(leader)
+                has_gap_cell = True
+            elif cls == "scoot":
+                gap_names["3rd_party"].append(leader)
+                has_gap_cell = True
 
-        if not all_empty and not has_tentative:
+        # A row is a gap if: all leaders empty, OR any leader cell is flagged
+        if not all_empty and not has_gap_cell:
             continue
 
         day = row.get(config.SHEET_DAY_COL, "").strip()
@@ -286,7 +349,22 @@ def get_gap_workshops(gc: gspread.Client, creds: ServiceCredentials) -> list[dic
         time_str = f"{start_time}-{end_time}" if start_time and end_time else start_time or end_time
         start_date_str = row.get("Start Date", "").strip()
 
-        gap_type = "OPEN (no leaders)" if all_empty else "TENTATIVE (interview only)"
+        # Determine the gap type label
+        if all_empty:
+            gap_type = "OPEN (no leaders)"
+        elif gap_names["backout"]:
+            gap_type = "BACKOUT"
+        elif gap_names["3rd_party"]:
+            gap_type = "3RD PARTY (Scoot)"
+        else:
+            gap_type = "TENTATIVE (interview only)"
+
+        # Collect all flagged names
+        tentative_names = (
+            gap_names["tentative"]
+            + gap_names["backout"]
+            + gap_names["3rd_party"]
+        )
 
         district = row.get(config.SHEET_DISTRICT_COL, "").strip()
         zone = row.get(config.SHEET_ZONE_COL, "").strip()
@@ -326,6 +404,113 @@ def normalize_location(loc: str) -> str:
     return config.LOCATION_ALIASES.get(key, key)
 
 
+WEEKDAYS = {"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
+
+
+def _parse_available_days(text: str) -> set[str]:
+    """Extract weekday names from free-text availability like 'Monday, Tuesday, Friday'."""
+    days = set()
+    for word in text.lower().replace(",", " ").split():
+        word = word.strip()
+        if word in WEEKDAYS:
+            days.add(word.capitalize())
+        # Handle partial matches like "Tuesdays" -> "Tuesday"
+        for wd in WEEKDAYS:
+            if word.startswith(wd):
+                days.add(wd.capitalize())
+    return days
+
+
+def get_form_candidates(gc: "gspread.Client") -> list[dict]:
+    """Return candidates from the Leader Confirmation Form Responses sheet.
+
+    Filters out Inactive rows and rows older than CANDIDATE_FRESHNESS_MONTHS.
+    """
+    spreadsheet = gc.open_by_key(config.FORM_SHEET_ID)
+    for ws in spreadsheet.worksheets():
+        if ws.id == config.FORM_SHEET_GID:
+            sheet = ws
+            break
+    else:
+        log.warning("Form Responses sheet (GID %s) not found", config.FORM_SHEET_GID)
+        return []
+
+    all_rows = sheet.get_all_values()
+    if not all_rows:
+        return []
+
+    headers = all_rows[0]
+    col_map = {h: i for i, h in enumerate(headers)}
+
+    def _col(key: str) -> int:
+        # Try exact match first, then prefix match for long column names
+        if key in col_map:
+            return col_map[key]
+        for h, i in col_map.items():
+            if h.startswith(key[:40]):
+                return i
+        return -1
+
+    name_idx = _col(config.FORM_NAME_COL)
+    email_idx = _col(config.FORM_EMAIL_COL)
+    days_idx = _col(config.FORM_DAYS_COL)
+    loc_idx = _col(config.FORM_LOCATION_COL)
+    date_idx = _col(config.FORM_DATE_COL)
+    status_idx = _col(config.FORM_STATUS_COL)
+    returning_idx = _col(config.FORM_RETURNING_COL)
+
+    cutoff = date.today() - timedelta(days=config.CANDIDATE_FRESHNESS_MONTHS * 30)
+    results = []
+
+    for row in all_rows[1:]:
+        def _get(idx: int) -> str:
+            return row[idx].strip() if 0 <= idx < len(row) else ""
+
+        # Skip inactive
+        if _get(status_idx).lower() == "inactive":
+            continue
+
+        # Parse and check form submission date
+        date_str = _get(date_idx)
+        form_date = None
+        if date_str:
+            # Format: "2/11/2026 11:23:21"
+            try:
+                form_date = datetime.strptime(date_str.split()[0], "%m/%d/%Y").date()
+            except ValueError:
+                pass
+        if form_date and form_date < cutoff:
+            continue
+
+        name = _get(name_idx)
+        email = _get(email_idx)
+        if not name:
+            continue
+
+        # Parse locations — may be comma-separated free text
+        raw_loc = _get(loc_idx)
+        locations = [loc.strip() for loc in raw_loc.split(",") if loc.strip()] if raw_loc else []
+
+        # Parse available days
+        available_days = _parse_available_days(_get(days_idx))
+
+        returning = _get(returning_idx)
+        status = "Returning Leader" if returning.lower() == "yes" else "Form Applicant"
+
+        results.append({
+            "id": f"form::{email or name}",
+            "name": name,
+            "status": status,
+            "locations": locations,
+            "email": email,
+            "available_days": available_days,
+            "source": "form",
+        })
+
+    log.info("Found %d form candidate(s) within %d-month window", len(results), config.CANDIDATE_FRESHNESS_MONTHS)
+    return results
+
+
 def find_matches(
     candidates: list[dict], workshops: list[dict]
 ) -> list[tuple[dict, list[dict]]]:
@@ -341,6 +526,18 @@ def find_matches(
         for loc in candidate["locations"]:
             key = normalize_location(loc)
             matched_ws.extend(region_index.get(key, []))
+
+        # For form candidates, filter workshops to matching days when possible
+        cand_days = candidate.get("available_days", set())
+        if cand_days and candidate.get("source") == "form":
+            day_filtered = [
+                ws for ws in matched_ws
+                if ws.get("day", "").strip().capitalize() in cand_days
+            ]
+            # Only apply day filter if it still leaves some matches
+            if day_filtered:
+                matched_ws = day_filtered
+
         seen = set()
         unique = []
         for ws in matched_ws:
