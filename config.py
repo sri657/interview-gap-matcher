@@ -30,7 +30,7 @@ NOTION_LOCATION_PROPERTY = "Location"      # type: multi_select (e.g. "LA", "SF"
 SHEET_GID = int(os.environ.get("SHEET_GID", "102025870"))
 
 # Exact column headers from the sheet
-SHEET_REGION_COL = "Region"
+SHEET_REGION_COL = "District"  # Col B in sheet (labeled "District" but contains region: SF, LA, etc.)
 SHEET_SITE_COL = "Site"
 SHEET_DAY_COL = "Day"
 SHEET_START_TIME_COL = "Start Time"

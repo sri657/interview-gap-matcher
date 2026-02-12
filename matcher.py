@@ -652,15 +652,15 @@ def build_slack_message(candidate: dict, workshops: list[dict]) -> str:
     )
 
 
-def post_to_slack(slack: SlackClient, message: str, retries: int = 3) -> None:
+def post_to_slack(slack: SlackClient, message: str, retries: int = 5) -> None:
     for attempt in range(retries):
         try:
             slack.chat_postMessage(channel=config.SLACK_CHANNEL, text=message)
             return
         except SlackApiError as e:
             if e.response["error"] == "ratelimited" and attempt < retries - 1:
-                wait = int(e.response.headers.get("Retry-After", 5))
-                log.warning("Rate limited by Slack, waiting %ds...", wait)
+                wait = int(e.response.headers.get("Retry-After", 10))
+                log.warning("Rate limited by Slack, waiting %ds (attempt %d/%d)...", wait, attempt + 1, retries)
                 time.sleep(wait)
             else:
                 log.error("Slack API error: %s", e.response["error"])
@@ -732,11 +732,16 @@ def main() -> None:
         else:
             post_to_slack(slack, message)
             log.info("Posted match for %s", candidate["name"])
+            time.sleep(1.2)  # stay under Slack's ~1 msg/sec rate limit
 
         now = datetime.now(timezone.utc).isoformat()
         for ws in unseen:
             notified[notified_key(candidate["id"], ws["workshop_key"])] = now
         new_notifications += 1
+
+        # Save after each post so progress isn't lost on crash
+        if not args.dry_run and new_notifications % 5 == 0:
+            save_notified(notified)
 
     save_notified(notified)
 
