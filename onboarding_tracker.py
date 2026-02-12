@@ -199,8 +199,11 @@ def scan_leader_cells(
 # Notion: create onboarding page
 # ---------------------------------------------------------------------------
 
-def _find_existing_onboarding_page(leader_name: str) -> str | None:
-    """Check if a page with this leader name already exists in the onboarding DB."""
+def _find_existing_onboarding_page(leader_name: str) -> tuple[str, str] | None:
+    """Check if a page with this leader name already exists in the onboarding DB.
+
+    Returns (page_id, page_url) or None.
+    """
     body = {
         "filter": {
             "property": "",
@@ -219,8 +222,46 @@ def _find_existing_onboarding_page(leader_name: str) -> str | None:
     data = resp.json()
     results = data.get("results", [])
     if results:
-        return results[0].get("url")
+        return results[0]["id"], results[0].get("url", "")
     return None
+
+
+def _update_returning_leader_page(
+    page_id: str,
+    region: str,
+    site: str,
+    start_date_str: str,
+) -> str | None:
+    """Update an existing Notion page for a returning leader.
+
+    Clears trainer assignment, sets status to Returning- Reactivate Gusto,
+    and updates school/region/start date for the new assignment.
+    """
+    start_date_iso = None
+    parsed = _parse_date(start_date_str)
+    if parsed:
+        start_date_iso = parsed.isoformat()
+
+    properties: dict = {
+        "Readiness Status": {"select": {"name": "Returning- Reactivate Gusto"}},
+        "Trainer Assigned": {"select": None},
+        "Region": {"select": {"name": region}},
+        "School Teaching": {"multi_select": [{"name": site}]},
+    }
+    if start_date_iso:
+        properties["Start Date"] = {"date": {"start": start_date_iso}}
+
+    resp = httpx.patch(
+        f"{NOTION_BASE}/pages/{page_id}",
+        headers=NOTION_HEADERS,
+        json={"properties": properties},
+        timeout=30,
+    )
+    if resp.status_code >= 400:
+        log.error("Notion API error %s: %s", resp.status_code, resp.text)
+    resp.raise_for_status()
+    page = resp.json()
+    return page.get("url")
 
 
 def create_onboarding_page(
@@ -228,15 +269,18 @@ def create_onboarding_page(
     region: str,
     site: str,
     start_date_str: str,
-) -> str | None:
-    """Create a page in the Notion onboarding DB. Returns the page URL or None.
+) -> tuple[str | None, bool]:
+    """Create or update a page in the Notion onboarding DB.
 
-    Checks for existing pages with the same name first to avoid duplicates.
+    Returns (page_url, is_returning). If a page already exists the leader is
+    treated as returning: their card is updated instead of creating a new one.
     """
     existing = _find_existing_onboarding_page(leader_name)
     if existing:
-        log.info("Notion page already exists for %s, skipping creation", leader_name)
-        return existing
+        page_id, page_url = existing
+        log.info("Returning leader %s — updating existing Notion page", leader_name)
+        url = _update_returning_leader_page(page_id, region, site, start_date_str)
+        return url or page_url, True
 
     start_date_iso = None
     parsed = _parse_date(start_date_str)
@@ -270,7 +314,7 @@ def create_onboarding_page(
         log.error("Notion API error %s: %s", resp.status_code, resp.text)
     resp.raise_for_status()
     page = resp.json()
-    return page.get("url")
+    return page.get("url"), False
 
 
 # ---------------------------------------------------------------------------
@@ -289,8 +333,9 @@ def create_offboarding_page(
     """
     existing = _find_existing_onboarding_page(leader_name)
     if existing:
+        _page_id, page_url = existing
         log.info("Notion page already exists for %s, skipping offboarding creation", leader_name)
-        return existing
+        return page_url
 
     start_date_iso = None
     parsed = _parse_date(start_date_str)
@@ -367,6 +412,7 @@ def build_onboarding_alert(
     event: dict,
     notion_url: str | None,
     mention_ids: dict[str, str],
+    is_returning: bool = False,
 ) -> str:
     dates = _format_dates(event["start_date"], event["end_date"])
     dates_line = f"\n*Dates:* {dates}" if dates else ""
@@ -378,9 +424,26 @@ def build_onboarding_alert(
         if uid:
             mention_parts.append(f"<@{uid}>")
         else:
-            # Fallback: plain name from email
             mention_parts.append(email.split("@")[0].replace(".", " ").title())
     mention_str = " ".join(mention_parts) if mention_parts else ""
+
+    if is_returning:
+        notion_line = ""
+        if notion_url:
+            notion_line = f"\n:arrows_counterclockwise: Notion card updated \u2192 {notion_url}"
+        return (
+            f":arrows_counterclockwise: *RETURNING LEADER \u2014 NEW MATCH*\n\n"
+            f"*Leader:* {event['leader_name']}\n"
+            f"*School:* {event['site']} ({event['region']})\n"
+            f"*Program:* {event['lesson']} \u2014 {event['day']}s {event['time']}"
+            f"{dates_line}"
+            f"{notion_line}\n"
+            f":clipboard: Next steps: {mention_str} \u2014 reactivate Gusto & retrain on new lesson\n\n"
+            f"Checklist:\n"
+            f"\u2610 Reactivate Gusto\n"
+            f"\u2610 New lesson plan sent\n"
+            f"\u2610 Retrain on new lesson"
+        )
 
     notion_line = ""
     if notion_url:
@@ -515,26 +578,28 @@ def main() -> None:
     # --- Process onboarding events ---
     for event in new_onboarding:
         notion_url = None
+        is_returning = False
         slack_ok = False
         if args.dry_run:
             print("--- DRY RUN: NOTION PAGE ---")
-            print(f"  Would create onboarding page for: {event['leader_name']}")
+            print(f"  Would create/update onboarding page for: {event['leader_name']}")
             print(f"  Region: {event['region']}, Site: {event['site']}")
             print(f"  Start Date: {event['start_date']}")
             print()
         else:
             try:
-                notion_url = create_onboarding_page(
+                notion_url, is_returning = create_onboarding_page(
                     leader_name=event["leader_name"],
                     region=event["region"],
                     site=event["site"],
                     start_date_str=event["start_date"],
                 )
-                log.info("Created Notion page for %s: %s", event["leader_name"], notion_url)
+                action = "Updated returning" if is_returning else "Created"
+                log.info("%s Notion page for %s: %s", action, event["leader_name"], notion_url)
             except Exception:
                 log.exception("Failed to create Notion page for %s", event["leader_name"])
 
-        message = build_onboarding_alert(event, notion_url, mention_ids)
+        message = build_onboarding_alert(event, notion_url, mention_ids, is_returning)
         if args.dry_run:
             print("--- DRY RUN: SLACK #ops-onboarding ---")
             print(message)
