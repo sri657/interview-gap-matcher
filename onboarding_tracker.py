@@ -11,6 +11,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import ssl
 import time
 from datetime import datetime, timezone, date
@@ -167,12 +168,21 @@ def scan_leader_cells(
         for col_name, cls in zip(leader_cols, cell_classes):
             if cls not in TRACKED_CLASSES:
                 continue
-            leader_name = row.get(col_name, "").strip()
-            if not leader_name:
+            raw_value = row.get(col_name, "").strip()
+            if not raw_value:
                 continue
+
+            # Extract email if embedded in the cell (e.g. "Name email@x.com" or "Name\nemail@x.com")
+            leader_name = raw_value
+            leader_email = ""
+            email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.]+', raw_value)
+            if email_match:
+                leader_email = email_match.group(0)
+                leader_name = raw_value.replace(leader_email, "").replace("\n", " ").strip()
 
             events.append({
                 "leader_name": leader_name,
+                "leader_email": leader_email,
                 "workshop_key": workshop_key,
                 "cell_class": cls,
                 "region": region,
@@ -245,9 +255,10 @@ def _update_returning_leader_page(
     properties: dict = {
         "Readiness Status": {"select": {"name": "Returning Leader- Onboarding Needed"}},
         "Trainer Assigned": {"select": None},
-        "Region": {"select": {"name": region}},
         "School Teaching": {"multi_select": [{"name": site}]},
     }
+    if region:
+        properties["Region"] = {"select": {"name": region}}
     if start_date_iso:
         properties["Start Date"] = {"date": {"start": start_date_iso}}
 
@@ -289,13 +300,14 @@ def create_onboarding_page(
 
     properties: dict = {
         "": {"title": [{"text": {"content": leader_name}}]},
-        "Region": {"select": {"name": region}},
         "Season": {"select": {"name": "Winter 2026"}},
         "Readiness Status": {"select": {"name": "Matched"}},
         "School Teaching": {"multi_select": [{"name": site}]},
         "Compliance Status": {"select": {"name": "Not Sent"}},
         "Leader Type": {"select": {"name": "Leader"}},
     }
+    if region:
+        properties["Region"] = {"select": {"name": region}}
     if start_date_iso:
         properties["Start Date"] = {"date": {"start": start_date_iso}}
 
@@ -344,12 +356,13 @@ def create_offboarding_page(
 
     properties: dict = {
         "": {"title": [{"text": {"content": leader_name}}]},
-        "Region": {"select": {"name": region}},
         "Season": {"select": {"name": "Winter 2026"}},
         "Readiness Status": {"select": {"name": "Offboarding Needed"}},
         "School Teaching": {"multi_select": [{"name": site}]},
         "Leader Type": {"select": {"name": "Leader"}},
     }
+    if region:
+        properties["Region"] = {"select": {"name": region}}
     if start_date_iso:
         properties["Start Date"] = {"date": {"start": start_date_iso}}
 
@@ -411,38 +424,26 @@ def _format_dates(start: str, end: str) -> str:
 def build_onboarding_alert(
     event: dict,
     notion_url: str | None,
-    mention_ids: dict[str, str],
     is_returning: bool = False,
 ) -> str:
     dates = _format_dates(event["start_date"], event["end_date"])
     dates_line = f"\n*Dates:* {dates}" if dates else ""
-
-    # Build @mention string for ops team
-    mention_parts = []
-    for email in config.ONBOARDING_MENTION_EMAILS:
-        uid = mention_ids.get(email)
-        if uid:
-            mention_parts.append(f"<@{uid}>")
-        else:
-            mention_parts.append(email.split("@")[0].replace(".", " ").title())
-    mention_str = " ".join(mention_parts) if mention_parts else ""
+    email = event.get("leader_email", "")
+    email_line = f"\n*Email:* {email}" if email else ""
 
     if is_returning:
         notion_line = ""
         if notion_url:
             notion_line = f"\n:arrows_counterclockwise: Notion card updated \u2192 {notion_url}"
         return (
-            f":arrows_counterclockwise: *RETURNING LEADER \u2014 NEW MATCH*\n\n"
-            f"*Leader:* {event['leader_name']}\n"
-            f"*School:* {event['site']} ({event['region']})\n"
+            f":arrows_counterclockwise: *RETURNING LEADER \u2014 NEW SCHOOL ASSIGNMENT*\n\n"
+            f"*Leader:* {event['leader_name']}{email_line}\n"
+            f"*New School:* {event['site']} ({event['region']})\n"
             f"*Program:* {event['lesson']} \u2014 {event['day']}s {event['time']}"
             f"{dates_line}"
-            f"{notion_line}\n"
-            f":clipboard: Next steps: {mention_str} \u2014 reactivate Gusto & retrain on new lesson\n\n"
-            f"Checklist:\n"
-            f"\u2610 Reactivate Gusto\n"
-            f"\u2610 New lesson plan sent\n"
-            f"\u2610 Retrain on new lesson"
+            f"{notion_line}\n\n"
+            f"This leader has been assigned to a new school. Please add them to it and onboard.\n"
+            f":clipboard: *Next steps:* Verify if Checkr is cleared, add to new school & onboard"
         )
 
     notion_line = ""
@@ -451,18 +452,12 @@ def build_onboarding_alert(
 
     return (
         f":large_green_circle: *NEW ONBOARDING NEEDED*\n\n"
-        f"*Leader:* {event['leader_name']}\n"
+        f"*Leader:* {event['leader_name']}{email_line}\n"
         f"*School:* {event['site']} ({event['region']})\n"
         f"*Program:* {event['lesson']} \u2014 {event['day']}s {event['time']}"
         f"{dates_line}"
-        f"{notion_line}\n"
-        f":clipboard: Next steps: {mention_str} \u2014 kick off Checkr background check\n\n"
-        f"Checklist:\n"
-        f"\u2610 Background check (Checkr)\n"
-        f"\u2610 Gusto setup\n"
-        f"\u2610 Slack invite\n"
-        f"\u2610 LearnDash access\n"
-        f"\u2610 Lesson plan sent"
+        f"{notion_line}\n\n"
+        f":clipboard: *Next step:* Kick off Checkr background check"
     )
 
 
@@ -538,11 +533,6 @@ def main() -> None:
     gc = gspread.authorize(creds)
     slack = SlackClient(token=config.SLACK_BOT_TOKEN)
 
-    # Look up Slack user IDs for @mentions (best-effort)
-    mention_ids: dict[str, str] = {}
-    if not args.dry_run:
-        mention_ids = _lookup_slack_user_ids(slack, config.ONBOARDING_MENTION_EMAILS)
-
     # --- Scan Ops Hub for tracked leader cells ---
     events = scan_leader_cells(gc, creds)
 
@@ -599,7 +589,7 @@ def main() -> None:
             except Exception:
                 log.exception("Failed to create Notion page for %s", event["leader_name"])
 
-        message = build_onboarding_alert(event, notion_url, mention_ids, is_returning)
+        message = build_onboarding_alert(event, notion_url, is_returning)
         if args.dry_run:
             print("--- DRY RUN: SLACK #ops-onboarding ---")
             print(message)
