@@ -179,6 +179,8 @@ def scan_leader_cells(
             if email_match:
                 leader_email = email_match.group(0)
                 leader_name = raw_value.replace(leader_email, "").replace("\n", " ").strip()
+            # Strip parenthetical notes like "(TUES,FRI)" or "(WED-FRI)"
+            leader_name = re.sub(r'\s*\([^)]*\)\s*$', '', leader_name).strip()
 
             events.append({
                 "leader_name": leader_name,
