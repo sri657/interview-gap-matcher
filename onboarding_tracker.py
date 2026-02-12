@@ -291,7 +291,7 @@ def create_onboarding_page(
         "": {"title": [{"text": {"content": leader_name}}]},
         "Region": {"select": {"name": region}},
         "Season": {"select": {"name": "Winter 2026"}},
-        "Readiness Status": {"select": {"name": "Onboarding"}},
+        "Readiness Status": {"select": {"name": "Matched"}},
         "School Teaching": {"multi_select": [{"name": site}]},
         "Compliance Status": {"select": {"name": "Not Sent"}},
         "Leader Type": {"select": {"name": "Leader"}},

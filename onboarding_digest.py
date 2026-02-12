@@ -85,8 +85,14 @@ def query_onboarding_leaders() -> list[dict]:
     Returns raw Notion page objects with pagination.
     """
     notion_filter = {
-        "property": "Readiness Status",
-        "select": {"equals": "Onboarding"},
+        "or": [
+            {"property": "Readiness Status", "select": {"equals": "Matched"}},
+            {"property": "Readiness Status", "select": {"equals": "Background Check Pending"}},
+            {"property": "Readiness Status", "select": {"equals": "Onboarding Setup"}},
+            {"property": "Readiness Status", "select": {"equals": "Training Pending"}},
+            {"property": "Readiness Status", "select": {"equals": "Returning Leader- Onboarding Needed"}},
+            {"property": "Readiness Status", "select": {"equals": "Onboarding"}},
+        ],
     }
     results = []
     cursor = None
