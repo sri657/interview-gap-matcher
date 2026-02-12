@@ -147,3 +147,12 @@ SHEET_MATCHES_TAB_NAME = os.environ.get("SHEET_MATCHES_TAB_NAME", "Gap Matches")
 # Dedup
 # ---------------------------------------------------------------------------
 NOTIFIED_PATH = os.path.join(os.path.dirname(__file__), "notified.json")
+
+# ---------------------------------------------------------------------------
+# Onboarding tracker
+# ---------------------------------------------------------------------------
+ONBOARDING_DB_ID = os.environ.get("ONBOARDING_DB_ID", "b8151685f6614222a40ea7e0ca237ba9")
+SLACK_ONBOARDING_CHANNEL = os.environ.get("SLACK_ONBOARDING_CHANNEL", "C09ES3F5ZCG")
+SLACK_OFFBOARDING_CHANNEL = os.environ.get("SLACK_OFFBOARDING_CHANNEL", "C09F3N91G69")
+ONBOARDING_MENTION_EMAILS = ["mitzi.yap@kodely.io", "jethro@kodely.io"]
+ONBOARDED_PATH = os.path.join(os.path.dirname(__file__), "onboarded.json")
