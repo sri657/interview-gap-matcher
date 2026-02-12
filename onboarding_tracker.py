@@ -214,8 +214,16 @@ def scan_leader_cells(
 def _find_existing_onboarding_page(leader_name: str) -> tuple[str, str] | None:
     """Check if a page with this leader name already exists in the onboarding DB.
 
+    Uses a two-pass approach:
+      1. Exact title match (fast path)
+      2. Fuzzy search using first name, then checks if:
+         - The existing title contains the new name (email-appended titles)
+         - The new name contains the existing title (abbreviated names)
+         - First name matches and last initial matches (e.g. "Lahni S" vs "Lahni Snow")
+
     Returns (page_id, page_url) or None.
     """
+    # --- Pass 1: exact match ---
     body = {
         "filter": {
             "property": "",
@@ -229,12 +237,76 @@ def _find_existing_onboarding_page(leader_name: str) -> tuple[str, str] | None:
         json=body,
         timeout=30,
     )
+    if resp.status_code < 400:
+        results = resp.json().get("results", [])
+        if results:
+            return results[0]["id"], results[0].get("url", "")
+
+    # --- Pass 2: fuzzy match on first name ---
+    first_name = leader_name.split()[0] if leader_name.strip() else ""
+    if not first_name or len(first_name) < 2:
+        return None
+
+    body = {
+        "filter": {
+            "property": "",
+            "title": {"contains": first_name},
+        },
+        "page_size": 20,
+    }
+    resp = httpx.post(
+        f"{NOTION_BASE}/databases/{config.ONBOARDING_DB_ID}/query",
+        headers=NOTION_HEADERS,
+        json=body,
+        timeout=30,
+    )
     if resp.status_code >= 400:
         return None
-    data = resp.json()
-    results = data.get("results", [])
-    if results:
-        return results[0]["id"], results[0].get("url", "")
+
+    new_lower = leader_name.lower().strip()
+    new_parts = new_lower.split()
+
+    for page in resp.json().get("results", []):
+        # Skip cards in "Matched" status — those are cards we just created
+        page_status = page.get("properties", {}).get("Readiness Status", {}).get("select")
+        if page_status and page_status.get("name") == "Matched":
+            continue
+
+        title_parts = page["properties"][""]["title"]
+        # Notion titles can span multiple rich_text blocks; join them all
+        existing_title = "".join(t["plain_text"] for t in title_parts).strip() if title_parts else ""
+        # Normalize: collapse newlines/whitespace, strip emails
+        existing_clean = re.sub(r'[\w.+-]+@[\w-]+\.[\w.]+', '', existing_title)
+        existing_clean = re.sub(r'\s+', ' ', existing_clean).strip().lower()
+
+        # Existing title contains the new name (e.g. "John Smith john@x.com" contains "john smith")
+        if new_lower in existing_clean:
+            return page["id"], page.get("url", "")
+
+        # New name contains the existing title (e.g. "Lahni Snow" contains "lahni s")
+        if existing_clean and existing_clean in new_lower:
+            return page["id"], page.get("url", "")
+
+        # First name matches + last initial matches (e.g. "Lahni Snow" vs "Lahni S")
+        existing_parts = existing_clean.split()
+        if len(new_parts) >= 2 and len(existing_parts) >= 2:
+            if new_parts[0] == existing_parts[0] and (
+                new_parts[-1][0] == existing_parts[-1][0]
+            ):
+                return page["id"], page.get("url", "")
+
+        # Check for parenthetical aliases: "Nahlani (Lahni) Snow" should match "Lahni Snow"
+        alias_match = re.search(r'\(([^)]+)\)', existing_clean)
+        if alias_match:
+            alias = alias_match.group(1).strip()
+            # Replace the alias into the title for comparison
+            alias_name = re.sub(r'\([^)]+\)', '', existing_clean).strip()
+            alias_parts = alias_name.split()
+            if alias == new_parts[0] and len(alias_parts) >= 1 and len(new_parts) >= 2:
+                # Alias first name matches and last name matches
+                if alias_parts[-1][0] == new_parts[-1][0]:
+                    return page["id"], page.get("url", "")
+
     return None
 
 
