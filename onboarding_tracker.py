@@ -571,8 +571,12 @@ def main() -> None:
         is_returning = False
         slack_ok = False
         if args.dry_run:
-            print("--- DRY RUN: NOTION PAGE ---")
-            print(f"  Would create/update onboarding page for: {event['leader_name']}")
+            existing = _find_existing_onboarding_page(event["leader_name"])
+            if existing:
+                is_returning = True
+            action = "Update returning" if is_returning else "Create"
+            print(f"--- DRY RUN: NOTION PAGE ({action}) ---")
+            print(f"  Would {action.lower()} onboarding page for: {event['leader_name']}")
             print(f"  Region: {event['region']}, Site: {event['site']}")
             print(f"  Start Date: {event['start_date']}")
             print()

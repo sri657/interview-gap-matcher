@@ -346,8 +346,8 @@ def get_gap_workshops(gc: gspread.Client, creds: ServiceCredentials) -> list[dic
         leaders = [leader1, leader2, leader3]
 
         # Non-gap statuses: gray (cancelled), yellow (interviewing),
-        # green (onboarding), purple (compliance), normal (confirmed)
-        SKIP_CLASSES = {"gray", "yellow", "green", "purple", "normal"}
+        # green (onboarding), purple (compliance), orange (matched), normal (confirmed)
+        SKIP_CLASSES = {"gray", "yellow", "green", "purple", "orange", "normal"}
 
         # If ALL filled leaders are grey/cancelled, skip the entire row
         non_gray_leaders = [
@@ -695,6 +695,9 @@ def main() -> None:
 
     # --- Fetch data ---
     candidates = get_matchable_candidates()
+    form_candidates = get_form_candidates(gc)
+    candidates.extend(form_candidates)
+    log.info("Total candidates (Notion + Form): %d", len(candidates))
     workshops = get_gap_workshops(gc, creds)
 
     if args.region:
