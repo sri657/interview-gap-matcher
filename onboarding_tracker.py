@@ -277,11 +277,44 @@ def _update_returning_leader_page(
     return page.get("url")
 
 
+def _build_assignment_blocks(event: dict) -> list[dict]:
+    """Build Notion page content blocks with workshop assignment details."""
+    lines = [
+        f"School: {event.get('site', '?')} ({event.get('region', '?')})",
+        f"Program: {event.get('lesson', '?')}",
+        f"Day: {event.get('day', '?')}",
+        f"Time: {event.get('time', '?')}",
+        f"Dates: {event.get('start_date', '?')} – {event.get('end_date', '?')}",
+    ]
+    if event.get("leader_email"):
+        lines.append(f"Email: {event['leader_email']}")
+
+    blocks = [
+        {
+            "object": "block",
+            "type": "heading_3",
+            "heading_3": {
+                "rich_text": [{"type": "text", "text": {"content": "Workshop Assignment"}}],
+            },
+        },
+    ]
+    for line in lines:
+        blocks.append({
+            "object": "block",
+            "type": "bulleted_list_item",
+            "bulleted_list_item": {
+                "rich_text": [{"type": "text", "text": {"content": line}}],
+            },
+        })
+    return blocks
+
+
 def create_onboarding_page(
     leader_name: str,
     region: str,
     site: str,
     start_date_str: str,
+    event: dict | None = None,
 ) -> tuple[str | None, bool]:
     """Create or update a page in the Notion onboarding DB.
 
@@ -293,6 +326,9 @@ def create_onboarding_page(
         page_id, page_url = existing
         log.info("Returning leader %s — updating existing Notion page", leader_name)
         url = _update_returning_leader_page(page_id, region, site, start_date_str)
+        # Append new assignment details as a comment block on the existing page
+        if event:
+            _append_assignment_blocks(page_id, event)
         return url or page_url, True
 
     start_date_iso = None
@@ -313,9 +349,12 @@ def create_onboarding_page(
     if start_date_iso:
         properties["Start Date"] = {"date": {"start": start_date_iso}}
 
+    children = _build_assignment_blocks(event) if event else []
+
     body = {
         "parent": {"database_id": config.ONBOARDING_DB_ID},
         "properties": properties,
+        "children": children,
     }
 
     resp = httpx.post(
@@ -329,6 +368,26 @@ def create_onboarding_page(
     resp.raise_for_status()
     page = resp.json()
     return page.get("url"), False
+
+
+def _append_assignment_blocks(page_id: str, event: dict) -> None:
+    """Append workshop assignment blocks to an existing Notion page."""
+    blocks = [
+        {
+            "object": "block",
+            "type": "divider",
+            "divider": {},
+        },
+    ] + _build_assignment_blocks(event)
+
+    resp = httpx.patch(
+        f"{NOTION_BASE}/blocks/{page_id}/children",
+        headers=NOTION_HEADERS,
+        json={"children": blocks},
+        timeout=30,
+    )
+    if resp.status_code >= 400:
+        log.warning("Failed to append assignment blocks: %s %s", resp.status_code, resp.text)
 
 
 # ---------------------------------------------------------------------------
@@ -589,6 +648,7 @@ def main() -> None:
                     region=event["region"],
                     site=event["site"],
                     start_date_str=event["start_date"],
+                    event=event,
                 )
                 action = "Updated returning" if is_returning else "Created"
                 log.info("%s Notion page for %s: %s", action, event["leader_name"], notion_url)
