@@ -170,6 +170,9 @@ def group_by_week(leaders: list[dict]) -> dict[str, list[dict]]:
         if not email and email_in_name:
             email = email_in_name.group(0)
 
+        returning_val = _get_property_value(page, "Returning Leader?")
+        is_returning = returning_val.lower() == "yes" if returning_val else False
+
         entry = {
             "name": name,
             "start_date": start,
@@ -177,6 +180,7 @@ def group_by_week(leaders: list[dict]) -> dict[str, list[dict]]:
             "page_id": page.get("id", ""),
             "page_url": page.get("url", ""),
             "status": _get_property_value(page, "Readiness Status"),
+            "is_returning": is_returning,
         }
 
         if start is None:
@@ -448,6 +452,137 @@ def send_leader_reminders(
 
 
 # ---------------------------------------------------------------------------
+# Email follow-ups: resend training link until they book
+# ---------------------------------------------------------------------------
+
+FOLLOWUP_INTERVAL_DAYS = 3  # one email every 3 days per leader
+
+
+def _build_training_followup_html(first_name: str, start_str: str, calendly_url: str) -> str:
+    """Build a short HTML email with just the training booking link."""
+    return f"""\
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head>
+<body style="font-family:Arial,Helvetica,sans-serif;max-width:600px;margin:0 auto;color:#1a1a2e;">
+
+<div style="background:#1a1a2e;padding:20px 24px;border-radius:8px 8px 0 0;">
+  <h2 style="color:#ffffff;margin:0;font-size:20px;">Training Reminder</h2>
+</div>
+
+<div style="padding:20px 24px;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 8px 8px;">
+  <p>Hi {first_name},</p>
+
+  <p>Your Kodely program starts <strong>{start_str}</strong> and you still need to book
+  your training session before you can begin.</p>
+
+  <p style="margin:20px 0;">
+    <a href="{calendly_url}"
+       style="background:#2563eb;color:#fff;padding:12px 24px;border-radius:6px;
+              text-decoration:none;font-weight:600;display:inline-block;">
+      Book Your Training Now
+    </a>
+  </p>
+
+  <p>If you have any questions, feel free to reply to this email or reach out to
+  <a href="mailto:talent@kodely.io" style="color:#2563eb;">talent@kodely.io</a>.</p>
+
+  <p>Best,<br><strong>The Kodely Team</strong></p>
+</div>
+
+<p style="color:#999;font-size:11px;text-align:center;margin-top:12px;">
+  This is an automated training reminder from Kodely.
+</p>
+
+</body></html>"""
+
+
+def _send_single_followup(to_email: str, first_name: str, html: str) -> bool:
+    """Send a single training follow-up email. Returns True on success."""
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"Reminder: Book Your Kodely Training, {first_name}!"
+    msg["From"] = config.EMAIL_FROM
+    msg["To"] = to_email
+    msg.attach(MIMEText(html, "html"))
+
+    context = ssl.create_default_context(cafile=certifi.where())
+    try:
+        with smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT, timeout=30) as server:
+            server.starttls(context=context)
+            server.login(config.SMTP_USER, config.SMTP_PASSWORD)
+            server.sendmail(config.EMAIL_FROM, [to_email], msg.as_string())
+        return True
+    except Exception:
+        log.exception("Failed to send training follow-up to %s", to_email)
+        return False
+
+
+def send_training_email_followups(
+    buckets: dict[str, list[dict]],
+    state: dict,
+    dry_run: bool = False,
+) -> int:
+    """Email leaders who haven't booked training yet.
+
+    Sends overdue, this_week, and next_week leaders a follow-up email
+    with their training booking link every FOLLOWUP_INTERVAL_DAYS days.
+    """
+    if not config.EMAILS_ENABLED:
+        log.info("EMAIL PAUSED (kill switch): would send training follow-up emails")
+        return 0
+
+    now = datetime.now(timezone.utc)
+    sent = 0
+
+    urgent_leaders = buckets["overdue"] + buckets["this_week"] + buckets["next_week"]
+
+    for entry in urgent_leaders:
+        email = entry.get("email", "").strip()
+        if not email:
+            continue
+
+        # Dedup: one email per leader every FOLLOWUP_INTERVAL_DAYS days
+        dedup_key = f"email_followup::{email}"
+        last_sent_str = state.get(dedup_key)
+        if last_sent_str:
+            try:
+                last_sent = datetime.fromisoformat(last_sent_str)
+                if (now - last_sent).days < FOLLOWUP_INTERVAL_DAYS:
+                    log.debug("Already emailed %s %d days ago — skipping",
+                              entry["name"], (now - last_sent).days)
+                    continue
+            except ValueError:
+                pass
+
+        first_name = entry["name"].split()[0] if entry["name"] else "there"
+        start_str = entry["start_date"].strftime("%B %-d, %Y") if entry["start_date"] else "soon"
+
+        # Pick the right Calendly link based on returning vs new leader
+        if entry.get("is_returning"):
+            calendly_url = config.WELCOME_RETURNING_CALENDLY_LINK
+        else:
+            calendly_url = config.CALENDLY_BOOKING_URL
+
+        html = _build_training_followup_html(first_name, start_str, calendly_url)
+
+        if dry_run:
+            label = "RETURNING" if entry.get("is_returning") else "NEW"
+            print(f"--- DRY RUN: TRAINING FOLLOW-UP EMAIL ({label}) ---")
+            print(f"  To: {entry['name']} <{email}>")
+            print(f"  Start: {start_str}")
+            print(f"  Calendly: {calendly_url}")
+            print()
+            sent += 1
+            continue
+
+        if _send_single_followup(email, first_name, html):
+            state[dedup_key] = now.isoformat()
+            log.info("Sent training follow-up email to %s (%s)", entry["name"], email)
+            sent += 1
+
+    return sent
+
+
+# ---------------------------------------------------------------------------
 # HTML email builder
 # ---------------------------------------------------------------------------
 
@@ -631,9 +766,12 @@ def main() -> None:
                 except Exception:
                     log.exception("Failed to post training reminder report")
 
-    # --- Send DM reminders to leaders (only when posting to Slack) ---
+    # --- Send DM reminders + email follow-ups to leaders ---
+    state = load_state() if leaders else {}
+    reminded = 0
+    emailed = 0
+
     if send_slack and leaders:
-        state = load_state()
         slack_dm = SlackClient(token=config.SLACK_BOT_TOKEN) if not args.dry_run else None
 
         reminded = send_leader_reminders(
@@ -643,11 +781,17 @@ def main() -> None:
             dry_run=args.dry_run,
         )
 
-        if not args.dry_run:
-            save_state(state)
-            log.info("State saved to %s", config.TRAINING_REMINDER_STATE_PATH)
-    else:
-        reminded = 0
+    # Email follow-ups run regardless of Slack mode (always send booking link emails)
+    if leaders:
+        emailed = send_training_email_followups(
+            buckets,
+            state=state,
+            dry_run=args.dry_run,
+        )
+
+    if leaders and not args.dry_run:
+        save_state(state)
+        log.info("State saved to %s", config.TRAINING_REMINDER_STATE_PATH)
 
     # --- HTML Email ---
     if send_html:
@@ -679,9 +823,10 @@ def main() -> None:
                 log.exception("Failed to send training report email")
 
     log.info(
-        "Done. %d leader(s) need training, %d reminded%s.",
+        "Done. %d leader(s) need training, %d DM'd, %d emailed%s.",
         sum(len(v) for v in buckets.values()),
         reminded,
+        emailed,
         " (dry run)" if args.dry_run else "",
     )
 
