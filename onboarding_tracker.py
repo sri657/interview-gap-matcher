@@ -318,8 +318,8 @@ def _update_returning_leader_page(
 ) -> str | None:
     """Update an existing Notion page for a returning leader.
 
-    Clears trainer assignment, sets status to Returning Leader- Onboarding Needed,
-    and updates school/region/start date for the new assignment.
+    Clears trainer assignment, sets status to Onboarding Setup,
+    flags as returning leader, and updates school/region/start date.
     """
     start_date_iso = None
     parsed = _parse_date(start_date_str)
@@ -327,9 +327,12 @@ def _update_returning_leader_page(
         start_date_iso = parsed.isoformat()
 
     properties: dict = {
-        "Readiness Status": {"select": {"name": "Returning Leader- Onboarding Needed"}},
+        "Readiness Status": {"select": {"name": "Onboarding Setup"}},
+        "Returning Leader?": {"select": {"name": "Yes"}},
         "Trainer Assigned": {"select": None},
         "School Teaching": {"multi_select": [{"name": site}]},
+        # Clear welcome email so they receive the returning leader welcome email
+        config.OB_ONBOARDING_EMAIL_PROPERTY: {"status": {"name": "No"}},
     }
     if region:
         properties["Region"] = {"select": {"name": region}}
@@ -408,6 +411,30 @@ def create_onboarding_page(
     if parsed:
         start_date_iso = parsed.isoformat()
 
+    # Look up email: first from the cell itself, then from Form Responses sheet
+    leader_email = None
+    if event and event.get("leader_email"):
+        leader_email = event["leader_email"]
+        log.info("Email from cell for %s: %s", leader_name, leader_email)
+    if not leader_email:
+        try:
+            from checkr_sync import load_form_emails
+            form_emails = load_form_emails()
+            clean_name = leader_name.strip().lower()
+            leader_email = form_emails.get(clean_name)
+            if not leader_email:
+                parts = clean_name.split()
+                if len(parts) >= 2:
+                    for fn, em in form_emails.items():
+                        fp = fn.split()
+                        if len(fp) >= 2 and fp[0] == parts[0] and fp[-1] == parts[-1]:
+                            leader_email = em
+                            break
+            if leader_email:
+                log.info("Auto-filled email for %s: %s", leader_name, leader_email)
+        except Exception:
+            log.warning("Could not load form emails for auto-fill")
+
     properties: dict = {
         "": {"title": [{"text": {"content": leader_name}}]},
         "Season": {"select": {"name": "Winter 2026"}},
@@ -416,6 +443,8 @@ def create_onboarding_page(
         "Compliance Status": {"select": {"name": "Not Sent"}},
         "Leader Type": {"select": {"name": "Leader"}},
     }
+    if leader_email:
+        properties["Email"] = {"email": leader_email}
     if region:
         properties["Region"] = {"select": {"name": region}}
     if start_date_iso:

@@ -30,7 +30,7 @@ NOTION_LOCATION_PROPERTY = "Location"      # type: multi_select (e.g. "LA", "SF"
 SHEET_GID = int(os.environ.get("SHEET_GID", "102025870"))
 
 # Exact column headers from the sheet
-SHEET_REGION_COL = "District"  # Col B in sheet (labeled "District" but contains region: SF, LA, etc.)
+SHEET_REGION_COL = "Region"  # Col B in sheet — geographic region (SF, LA, Chicago, etc.)
 SHEET_SITE_COL = "Site"
 SHEET_DAY_COL = "Day"
 SHEET_START_TIME_COL = "Start Time"
@@ -212,3 +212,71 @@ OB_TRAINING_STATUS_PROPERTY = "Training Status"
 CELL_COLOR_ORANGE = {"red": 1.0, "green": 0.6, "blue": 0.0}       # Matched
 CELL_COLOR_PURPLE = {"red": 0.6, "green": 0.0, "blue": 1.0}       # BG Check Pending
 CELL_COLOR_GREEN  = {"red": 0.0, "green": 0.8, "blue": 0.0}       # Onboarding Setup
+
+# ---------------------------------------------------------------------------
+# Calendly integration
+# ---------------------------------------------------------------------------
+CALENDLY_API_TOKEN = os.environ["CALENDLY_API_TOKEN"]
+CALENDLY_TRAINING_EVENT_NAMES = [
+    "kodely training call & dress rehearsal",
+    "kodely expedited training",
+    "returning leaders training/feedback call",
+    "feedback/expedited training",
+]
+CALENDLY_STATE_PATH = os.path.join(os.path.dirname(__file__), "calendly_state.json")
+CALENDLY_BOOKING_URL = "https://calendly.com/d/ck4y-gq8-nss/kodely-training-call-dress-rehearsal"
+
+# Expedited/feedback training event names (separate from regular training)
+CALENDLY_EXPEDITED_EVENT_NAMES = [
+    "feedback/expedited training",
+    "returning leaders training/feedback call",
+]
+
+# ---------------------------------------------------------------------------
+# Training reminder report
+# ---------------------------------------------------------------------------
+TRAINING_REMINDER_STATE_PATH = os.path.join(os.path.dirname(__file__), "training_reminder_state.json")
+
+# ---------------------------------------------------------------------------
+# Checkr background check integration
+# ---------------------------------------------------------------------------
+CHECKR_API_KEY = os.environ.get("CHECKR_API_KEY", "")
+CHECKR_PACKAGE = os.environ.get("CHECKR_PACKAGE", "rippling_basic_plus_package")
+CHECKR_STATE_PATH = os.path.join(os.path.dirname(__file__), "checkr_state.json")
+
+# ---------------------------------------------------------------------------
+# Slack Admin / provisioning
+# ---------------------------------------------------------------------------
+SLACK_ADMIN_TOKEN = os.environ.get("SLACK_ADMIN_TOKEN", "")  # xoxp- token with admin.users:write scope
+SLACK_TEAM_ID = os.environ.get("SLACK_TEAM_ID", "")  # Workspace team ID for admin.users.invite
+SLACK_WORKSHOP_CHANNEL = os.environ.get("SLACK_WORKSHOP_CHANNEL", "")  # Default workshop channel ID
+SLACK_PROVISION_STATE_PATH = os.path.join(os.path.dirname(__file__), "slack_provision_state.json")
+
+# ---------------------------------------------------------------------------
+# Welcome email links (embedded in onboarding email template)
+# ---------------------------------------------------------------------------
+WELCOME_CALENDLY_LINK = os.environ.get(
+    "WELCOME_CALENDLY_LINK",
+    "https://calendly.com/d/ck4y-gq8-nss/kodely-training-call-dress-rehearsal",
+)
+WELCOME_NOTION_CHECKLIST_LINK = os.environ.get("WELCOME_NOTION_CHECKLIST_LINK", "")
+WELCOME_QUIZ_LINK = os.environ.get("WELCOME_QUIZ_LINK", "")
+WELCOME_APP_LINK = os.environ.get(
+    "WELCOME_APP_LINK",
+    "https://apps.apple.com/us/app/kodely-leader/id6755861936",
+)
+WELCOME_ANDROID_LINK = os.environ.get(
+    "WELCOME_ANDROID_LINK",
+    "https://play.google.com/store/apps/details?id=com.kodely.leader.prod",
+)
+WELCOME_RETURNING_CALENDLY_LINK = os.environ.get(
+    "WELCOME_RETURNING_CALENDLY_LINK",
+    "https://calendly.com/d/cmnh-8w4-shf/returning-leaders-training-check-in",
+)
+WELCOME_EMAIL_STATE_PATH = os.path.join(os.path.dirname(__file__), "welcome_email_state.json")
+
+# ---------------------------------------------------------------------------
+# Anthropic API (for AI trainer notes)
+# ---------------------------------------------------------------------------
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+TRAINER_NOTES_STATE_PATH = os.path.join(os.path.dirname(__file__), "trainer_notes_state.json")

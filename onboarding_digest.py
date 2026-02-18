@@ -18,9 +18,12 @@ import argparse
 import json
 import logging
 import os
+import smtplib
 import ssl
 import time
 from datetime import date, datetime, timezone
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 
 import certifi
 import gspread
@@ -32,6 +35,44 @@ from slack_sdk.errors import SlackApiError
 
 import config
 from matcher import _get_worksheet_by_gid
+
+# Lazy imports for pipeline automation hooks (avoid circular imports at module level)
+_checkr_sync = None
+_welcome_email = None
+_slack_provision = None
+_trainer_notes = None
+
+
+def _get_checkr_sync():
+    global _checkr_sync
+    if _checkr_sync is None:
+        import checkr_sync as _cs
+        _checkr_sync = _cs
+    return _checkr_sync
+
+
+def _get_welcome_email():
+    global _welcome_email
+    if _welcome_email is None:
+        import welcome_email as _we
+        _welcome_email = _we
+    return _welcome_email
+
+
+def _get_slack_provision():
+    global _slack_provision
+    if _slack_provision is None:
+        import slack_provision as _sp
+        _slack_provision = _sp
+    return _slack_provision
+
+
+def _get_trainer_notes():
+    global _trainer_notes
+    if _trainer_notes is None:
+        import trainer_notes as _tn
+        _trainer_notes = _tn
+    return _trainer_notes
 
 os.environ.setdefault("SSL_CERT_FILE", certifi.where())
 ssl._create_default_https_context = lambda: ssl.create_default_context(
@@ -83,6 +124,34 @@ def save_digest_state(data: dict) -> None:
 # Notion helpers
 # ---------------------------------------------------------------------------
 
+_STAGE_PRIORITY = {
+    "Matched": 0,
+    "Background Check Pending": 1,
+    "Onboarding Setup": 2,
+    "Onboarding": 2,
+    "Training In Progress": 3,
+    "ACTIVE": 4,
+}
+
+
+def _dedup_leaders(leaders: list[dict]) -> list[dict]:
+    """Deduplicate leaders by name, keeping the card with the lowest pipeline stage.
+
+    When a leader has multiple Notion cards (e.g. one Matched and one ACTIVE),
+    we keep the one that's most relevant for onboarding.
+    """
+    by_name: dict[str, tuple[dict, int]] = {}
+    for page in leaders:
+        name = _get_leader_name(page).strip().lower()
+        if not name:
+            continue
+        status = _get_property_value(page, "Readiness Status")
+        priority = _STAGE_PRIORITY.get(status, 5)
+        if name not in by_name or priority < by_name[name][1]:
+            by_name[name] = (page, priority)
+    return [page for page, _ in by_name.values()]
+
+
 def query_onboarding_leaders() -> list[dict]:
     """Query Notion DB for all leaders with Readiness Status = 'Onboarding'.
 
@@ -95,7 +164,6 @@ def query_onboarding_leaders() -> list[dict]:
             {"property": "Readiness Status", "select": {"equals": "Onboarding Setup"}},
             {"property": "Readiness Status", "select": {"equals": "Training In Progress"}},
             {"property": "Readiness Status", "select": {"equals": "ACTIVE"}},
-            {"property": "Readiness Status", "select": {"equals": "Returning Leader- Onboarding Needed"}},
             {"property": "Readiness Status", "select": {"equals": "Onboarding"}},
         ],
     }
@@ -228,7 +296,6 @@ def _all_access_complete(page: dict) -> bool:
 _TRANSITION_MESSAGES = {
     "Background Check Pending": "Compliance check has been initiated.",
     "Onboarding Setup": "Background check cleared — ready for access setup.",
-    "Onboarding Setup (returning)": "Returning leader — Gusto reactivated, ready for access setup.",
     "Training In Progress": "All onboarding access granted — waiting on training.",
     "ACTIVE": "Training complete — please set up Gusto for this leader.",
 }
@@ -242,6 +309,10 @@ def _check_transition(page: dict) -> tuple[str, str] | None:
     status = _get_property_value(page, "Readiness Status")
 
     if status == "Matched":
+        compliance_val = _get_property_value(page, config.OB_COMPLIANCE_STATUS_PROPERTY)
+        if _is_task_complete(compliance_val):
+            # Compliance already cleared — skip straight to Onboarding Setup
+            return "Onboarding Setup", _TRANSITION_MESSAGES["Onboarding Setup"]
         if _compliance_started(page):
             return "Background Check Pending", _TRANSITION_MESSAGES["Background Check Pending"]
 
@@ -252,12 +323,11 @@ def _check_transition(page: dict) -> tuple[str, str] | None:
 
     elif status == "Onboarding Setup":
         if _all_access_complete(page):
+            # Returning leaders already have training from before — skip to ACTIVE
+            training_val = _get_property_value(page, config.OB_TRAINING_STATUS_PROPERTY)
+            if _is_task_complete(training_val):
+                return "ACTIVE", "Returning leader — all access + training already complete."
             return "Training In Progress", _TRANSITION_MESSAGES["Training In Progress"]
-
-    elif status == "Returning Leader- Onboarding Needed":
-        gusto_val = _get_property_value(page, config.OB_GUSTO_PROPERTY)
-        if _is_task_complete(gusto_val):
-            return "Onboarding Setup", _TRANSITION_MESSAGES["Onboarding Setup (returning)"]
 
     elif status == "Training In Progress":
         training_val = _get_property_value(page, config.OB_TRAINING_STATUS_PROPERTY)
@@ -279,6 +349,68 @@ def _patch_readiness_status(page_id: str, new_stage: str) -> bool:
         log.error("Failed to advance page %s to %s: %s %s", page_id, new_stage, resp.status_code, resp.text)
         return False
     return True
+
+
+# ---------------------------------------------------------------------------
+# Ops Hub workshop lookup
+# ---------------------------------------------------------------------------
+
+def _get_leader_workshops(sheet_data: list[list[str]], leader_name: str) -> list[dict]:
+    """Find all active workshop assignments for a leader from the Ops Hub sheet.
+
+    Searches Leader 1/2/3 columns for the leader name (case-insensitive)
+    and returns workshop details from each matching row.
+    """
+    if not sheet_data or len(sheet_data) < 2:
+        return []
+
+    header = sheet_data[0]
+    col_map = {h.strip(): i for i, h in enumerate(header) if h.strip()}
+
+    site_idx = col_map.get("Site")
+    day_idx = col_map.get("Day")
+    start_idx = col_map.get("Start Time")
+    end_idx = col_map.get("End Time")
+    lesson_idx = col_map.get("Lesson")
+    district_idx = col_map.get("District")
+
+    def _cell(row, idx):
+        if idx is not None and idx < len(row):
+            return row[idx].strip()
+        return ""
+
+    clean_name = leader_name.strip().lower()
+    workshops = []
+
+    for row in sheet_data[1:]:
+        for col_idx in (18, 19, 20):  # Leader 1, 2, 3 columns (S, T, U)
+            if col_idx < len(row) and row[col_idx].strip().lower() == clean_name:
+                site = _cell(row, site_idx)
+                day = _cell(row, day_idx)
+                start_t = _cell(row, start_idx)
+                end_t = _cell(row, end_idx)
+                lesson = _cell(row, lesson_idx)
+                district = _cell(row, district_idx)
+                if site or lesson:
+                    workshops.append({
+                        "site": site,
+                        "day": day,
+                        "time": f"{start_t}-{end_t}" if start_t else "",
+                        "lesson": lesson,
+                        "district": district,
+                    })
+                break
+    return workshops
+
+
+def build_workshop_map(sheet_data: list[list[str]], leaders: list[dict]) -> dict[str, list[dict]]:
+    """Build a map of leader name -> list of workshop assignments."""
+    ws_map: dict[str, list[dict]] = {}
+    for page in leaders:
+        name = _get_leader_name(page)
+        if name:
+            ws_map[name] = _get_leader_workshops(sheet_data, name)
+    return ws_map
 
 
 # Map target stage -> Ops Hub cell color (only stages that change color)
@@ -346,6 +478,50 @@ def _update_cell_color(
         log.info("Updated cell color at row=%d col=%d", row, col)
 
 
+def _run_transition_hooks(page: dict, new_stage: str, slack: "SlackClient") -> None:
+    """Fire automation hooks when a leader transitions to a new pipeline stage.
+
+    Called after a successful Notion status update. Each hook is wrapped in
+    try/except so a failure in one doesn't block others.
+    """
+    name = _get_leader_name(page)
+
+    if new_stage == "Onboarding Setup":
+        # Leader just cleared background check → send welcome email, provision Slack,
+        # mark lesson plan sent, generate trainer notes.
+
+        # Welcome email
+        try:
+            we = _get_welcome_email()
+            we.send_welcome_for_page(page, slack=slack)
+        except Exception:
+            log.exception("Hook: welcome email failed for %s", name)
+
+        # NOTE: Slack workspace/channel invites, LearnDash, and Management Tool
+        # are handled manually by the onboarding team for now.
+
+        # Mark lesson plan as sent (auto-included in welcome email resources)
+        try:
+            resp = httpx.patch(
+                f"{NOTION_BASE}/pages/{page.get('id', '')}",
+                headers=NOTION_HEADERS,
+                json={"properties": {config.OB_LESSON_PLAN_PROPERTY: {"select": {"name": "Sent"}}}},
+                timeout=30,
+            )
+            if resp.status_code < 400:
+                log.info("Hook: lesson plan marked sent for %s", name)
+        except Exception:
+            log.exception("Hook: lesson plan mark failed for %s", name)
+
+        # Trainer notes (AI-generated) — requires ANTHROPIC_API_KEY in .env
+        if config.ANTHROPIC_API_KEY:
+            try:
+                tn = _get_trainer_notes()
+                tn.generate_notes_for_page(page)
+            except Exception:
+                log.exception("Hook: trainer notes failed for %s", name)
+
+
 def advance_pipeline(
     leaders: list[dict],
     state: dict,
@@ -384,6 +560,15 @@ def advance_pipeline(
             print(f"--- DRY RUN: PIPELINE ADVANCE ---")
             print(f"  {name} ({region}): {current_stage} → {new_stage}")
             print(f"  Reason: {reason}")
+            if sheet_data:
+                workshops = _get_leader_workshops(sheet_data, name)
+                if workshops:
+                    print(f"  Workshop(s):")
+                    for ws in workshops:
+                        parts = [ws.get("site", ""), ws.get("day", ""), ws.get("time", ""), ws.get("lesson", "")]
+                        print(f"    • {' | '.join(p for p in parts if p)}")
+                else:
+                    print(f"  Workshop(s): NONE found in Ops Hub")
             color = _STAGE_COLOR_MAP.get(new_stage)
             if color and sheet_data:
                 cells = _find_leader_cells(sheet_data, name)
@@ -403,10 +588,34 @@ def advance_pipeline(
                     except Exception:
                         log.exception("Failed to update cell color for %s at (%d,%d)", name, r, c)
 
+            # Look up workshop assignments so the team knows what to onboard for
+            workshop_lines = ""
+            if sheet_data:
+                workshops = _get_leader_workshops(sheet_data, name)
+                if workshops:
+                    workshop_lines = "\n\n\U0001f3eb Workshop Assignment(s):\n"
+                    for ws in workshops:
+                        parts = []
+                        if ws.get("site"):
+                            parts.append(ws["site"])
+                        if ws.get("day"):
+                            parts.append(ws["day"])
+                        if ws.get("time"):
+                            parts.append(ws["time"])
+                        if ws.get("lesson"):
+                            parts.append(f"Lesson: {ws['lesson']}")
+                        if ws.get("district"):
+                            parts.append(f"({ws['district']})")
+                        workshop_lines += f"  • {' | '.join(parts)}\n"
+                else:
+                    workshop_lines = "\n\n\u26a0\ufe0f No workshop assignment found in Ops Hub yet."
+
             msg = (
                 f"\U0001f4ca PIPELINE UPDATE\n\n"
                 f"Leader: {name} \u2192 {new_stage}\n"
+                f"Region: {region}\n"
                 f"{reason}"
+                f"{workshop_lines}"
             )
             try:
                 post_to_slack(slack, config.SLACK_ONBOARDING_CHANNEL, msg)
@@ -414,9 +623,62 @@ def advance_pipeline(
             except Exception:
                 log.exception("Failed to post pipeline update for %s", name)
 
+            # --- Automation hooks on transition ---
+            _run_transition_hooks(page, new_stage, slack)
+
             messages.append(f"{name}: {current_stage} → {new_stage}")
 
         state[pipeline_key] = True
+
+    return messages
+
+
+def catch_up_hooks(
+    leaders: list[dict],
+    state: dict,
+    slack: "SlackClient",
+    dry_run: bool = False,
+) -> list[str]:
+    """Fire transition hooks for cards that were manually moved to a new stage.
+
+    If someone manually moves a card to 'Onboarding Setup' in Notion, the
+    welcome email / lesson plan hooks won't fire because advance_pipeline()
+    didn't trigger the transition.  This function detects those cases by
+    checking for cards in 'Onboarding Setup' where 'Onboarding Email Sent?'
+    is not yet marked complete, and fires the hooks.
+    """
+    messages = []
+
+    for page in leaders:
+        page_id = page.get("id", "")
+        name = _get_leader_name(page)
+        if not name:
+            continue
+
+        status = _get_property_value(page, "Readiness Status")
+        if status != "Onboarding Setup":
+            continue
+
+        email_sent = _get_property_value(page, config.OB_ONBOARDING_EMAIL_PROPERTY)
+        if _is_task_complete(email_sent):
+            continue
+
+        # This card is in Onboarding Setup but hasn't received a welcome email
+        hook_key = f"catchup_hooks_{page_id}_Onboarding Setup"
+        if state.get(hook_key):
+            continue
+
+        if dry_run:
+            print(f"--- DRY RUN: CATCH-UP HOOKS ---")
+            print(f"  {name}: in Onboarding Setup but welcome email not sent")
+            print(f"  Would fire: welcome email, lesson plan mark")
+            print()
+        else:
+            log.info("Catch-up hooks for %s (manually moved to Onboarding Setup)", name)
+            _run_transition_hooks(page, "Onboarding Setup", slack)
+            messages.append(f"{name}: catch-up hooks fired (welcome email + lesson plan)")
+
+        state[hook_key] = True
 
     return messages
 
@@ -444,7 +706,7 @@ def post_to_slack(slack: SlackClient, channel: str, message: str, retries: int =
 # Automation 1: Daily Digest
 # ---------------------------------------------------------------------------
 
-def build_digest_message(leaders: list[dict]) -> str:
+def build_digest_message(leaders: list[dict], ws_map: dict[str, list[dict]] | None = None) -> str:
     """Build the daily onboarding status digest Slack message.
 
     Leaders are grouped into:
@@ -509,11 +771,21 @@ def build_digest_message(leaders: list[dict]) -> str:
                 start_str = f" \u2014 Starts {entry['start'].strftime('%b %d')} ({d} day{'s' if d != 1 else ''})"
         done_str = ", ".join(entry["completed"]) if entry["completed"] else "None"
         todo_str = ", ".join(entry["incomplete"]) if entry["incomplete"] else "None"
-        return (
-            f"> {entry['name']} \u2014 {entry['region']}{start_str}\n"
-            f"> \u2705 {done_str}\n"
-            f"> \u274c {todo_str}"
-        )
+        parts = [
+            f"> {entry['name']} \u2014 {entry['region']}{start_str}",
+            f"> \u2705 {done_str}",
+            f"> \u274c {todo_str}",
+        ]
+        # Workshop assignments from Ops Hub
+        workshops = (ws_map or {}).get(entry["name"], [])
+        if workshops:
+            ws_lines = []
+            for w in workshops:
+                ws_lines.append(f">  \U0001f4cd {w['site']} \u2014 {w['lesson']} \u2014 {w['day']} {w['time']}")
+            parts.extend(ws_lines)
+        else:
+            parts.append(">  \U0001f4cd _No workshop assigned_")
+        return "\n".join(parts)
 
     if urgent:
         lines.append("")
@@ -541,6 +813,339 @@ def build_digest_message(leaders: list[dict]) -> str:
         lines.append(f"{fully_done} leader{'s' if fully_done != 1 else ''} fully onboarded (not shown)")
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Automation 1b: Onboarding Digest — HTML Email
+# ---------------------------------------------------------------------------
+
+def build_digest_email_html(leaders: list[dict], ws_map: dict[str, list[dict]] | None = None) -> str:
+    """Build the Daily Onboarding Report as an HTML email.
+
+    Same data as build_digest_message() but rendered as colour-coded HTML tables.
+    """
+    today = date.today()
+    today_str = today.strftime("%b %d, %Y")
+    urgent, warning, in_progress, fully_done_names = [], [], [], []
+
+    for page in leaders:
+        name = _get_leader_name(page)
+        region = _get_region(page)
+        start = _get_start_date(page)
+        completed = _get_completed_tasks(page)
+        incomplete = _get_incomplete_tasks(page)
+
+        if not incomplete:
+            fully_done_names.append(name)
+            continue
+
+        days_until = (start - today).days if start else 999
+        entry = {
+            "name": name,
+            "region": region,
+            "start": start,
+            "days_until": days_until,
+            "completed": completed,
+            "incomplete": incomplete,
+        }
+        if days_until < config.OB_URGENT_DAYS:
+            urgent.append(entry)
+        elif days_until < config.OB_WARNING_DAYS:
+            warning.append(entry)
+        else:
+            in_progress.append(entry)
+
+    for group in (urgent, warning, in_progress):
+        group.sort(key=lambda e: e["start"] or date.max)
+
+    total = len(leaders)
+
+    def _task_badges(completed: list[str], incomplete: list[str]) -> str:
+        parts = []
+        for t in completed:
+            parts.append(f"<span style='color:green;'>&#9989; {t}</span>")
+        for t in incomplete:
+            parts.append(f"<span style='color:red;'>&#10060; {t}</span>")
+        return " &nbsp; ".join(parts)
+
+    def _workshop_cell(name: str) -> str:
+        workshops = (ws_map or {}).get(name, [])
+        if not workshops:
+            return "<span style='color:#888;'>None assigned</span>"
+        parts = []
+        for w in workshops:
+            parts.append(f"{w['site']} &mdash; {w['lesson']}<br><small>{w['day']} {w['time']}</small>")
+        return "<br>".join(parts)
+
+    def _table(entries: list[dict]) -> str:
+        rows = [
+            "<table style='border-collapse:collapse;width:100%;' border='1' cellpadding='6' cellspacing='0'>",
+            "<tr style='background:#eee;'><th>Leader</th><th>Region</th><th>Starts</th><th>Tasks</th><th>Workshop(s)</th></tr>",
+        ]
+        for e in entries:
+            if e["start"]:
+                d = e["days_until"]
+                if d < 0:
+                    start_str = f"{e['start'].strftime('%b %-d')} ({-d}d ago)"
+                else:
+                    start_str = f"{e['start'].strftime('%b %-d')} ({d}d)"
+            else:
+                start_str = "TBD"
+            rows.append(
+                f"<tr><td>{e['name']}</td>"
+                f"<td>{e['region']}</td>"
+                f"<td>{start_str}</td>"
+                f"<td>{_task_badges(e['completed'], e['incomplete'])}</td>"
+                f"<td>{_workshop_cell(e['name'])}</td></tr>"
+            )
+        rows.append("</table>")
+        return "\n".join(rows)
+
+    html_parts = [
+        "<!DOCTYPE html><html><head><meta charset='utf-8'></head><body style='font-family:Arial,sans-serif;max-width:750px;margin:auto;'>",
+        f"<h2 style='background:#1a1a2e;color:#fff;padding:14px 18px;margin:0;border-radius:6px 6px 0 0;'>KODELY DAILY ONBOARDING REPORT &mdash; {today_str}</h2>",
+        f"<p style='padding:0 18px;'><strong>{total}</strong> leader{'s' if total != 1 else ''} actively onboarding</p>",
+    ]
+
+    if urgent:
+        html_parts.append(f"<h3 style='color:#cc0000;margin:18px 0 8px;'>&#128680; URGENT &mdash; Starting in &lt;{config.OB_URGENT_DAYS} days</h3>")
+        html_parts.append(_table(urgent))
+
+    if warning:
+        html_parts.append(f"<h3 style='color:#cc8800;margin:18px 0 8px;'>&#9888;&#65039; WARNING &mdash; Starting in &lt;{config.OB_WARNING_DAYS} days</h3>")
+        html_parts.append(_table(warning))
+
+    if in_progress:
+        html_parts.append("<h3 style='margin:18px 0 8px;'>&#9203; IN PROGRESS</h3>")
+        html_parts.append(_table(in_progress))
+
+    if fully_done_names:
+        names_str = ", ".join(fully_done_names)
+        html_parts.append(
+            f"<p style='margin:18px 0;'>&#9989; <strong>{len(fully_done_names)}</strong> "
+            f"leader{'s' if len(fully_done_names) != 1 else ''} fully onboarded: {names_str}</p>"
+        )
+
+    html_parts.append("<br><p style='color:#999;font-size:12px;'>Generated by Kodely Onboarding Report</p>")
+    html_parts.append("</body></html>")
+    return "\n".join(html_parts)
+
+
+def build_detailed_onboarding_report(
+    leaders: list[dict],
+    ws_map: dict[str, list[dict]] | None = None,
+) -> str:
+    """Build a detailed HTML report with individual columns for each onboarding step.
+
+    Groups leaders by pipeline stage and shows per-task status with clear
+    auto vs manual labels so the team knows exactly what to action.
+    """
+    today = date.today()
+    today_str = today.strftime("%b %d, %Y")
+
+    # Task columns: (notion_property, display_name, is_automated)
+    STEP_COLS = [
+        (config.OB_COMPLIANCE_STATUS_PROPERTY, "Background Check", True),
+        (config.OB_ONBOARDING_EMAIL_PROPERTY, "Welcome Email", True),
+        (config.OB_LESSON_PLAN_PROPERTY, "Lesson Plan", True),
+        (config.OB_SLACK_INVITE_PROPERTY, "Slack Invite", False),
+        (config.OB_WORKSHOP_SLACK_PROPERTY, "Workshop Slack", False),
+        (config.OB_GUSTO_PROPERTY, "Gusto", False),
+        (config.OB_TRAINING_STATUS_PROPERTY, "Training", True),
+    ]
+
+    # Group leaders by pipeline stage
+    stage_order = [
+        "Matched",
+        "Background Check Pending",
+        "Onboarding Setup",
+        "Training In Progress",
+        "ACTIVE",
+    ]
+    by_stage: dict[str, list[dict]] = {s: [] for s in stage_order}
+    other_stage: list[dict] = []
+
+    for page in leaders:
+        status = _get_property_value(page, "Readiness Status")
+        if status in by_stage:
+            by_stage[status].append(page)
+        else:
+            other_stage.append(page)
+
+    # Count totals
+    total = len(leaders)
+    active_count = len(by_stage.get("ACTIVE", []))
+    pipeline_count = total - active_count
+
+    # --- Build HTML ---
+    html = [
+        "<!DOCTYPE html><html><head><meta charset='utf-8'></head>",
+        "<body style='font-family:Arial,sans-serif;max-width:1000px;margin:auto;'>",
+        f"<h2 style='background:#1a1a2e;color:#fff;padding:14px 18px;margin:0;"
+        f"border-radius:6px 6px 0 0;'>KODELY ONBOARDING DETAILED REPORT &mdash; {today_str}</h2>",
+        f"<p style='padding:4px 18px;margin:0;'><strong>{pipeline_count}</strong> leaders in pipeline"
+        f" &nbsp;|&nbsp; <strong>{active_count}</strong> active</p>",
+        "<p style='padding:0 18px;margin:4px 0 12px;font-size:13px;color:#555;'>"
+        "&#9889; = Automated &nbsp;&nbsp; &#9997; = Manual action needed</p>",
+    ]
+
+    # Column header row builder
+    def _header_row() -> str:
+        cols = ["<th style='padding:6px 8px;text-align:left;white-space:nowrap;'>Leader</th>",
+                "<th style='padding:6px 8px;'>Region</th>",
+                "<th style='padding:6px 8px;'>Starts</th>",
+                "<th style='padding:6px 8px;'>Workshop</th>"]
+        for _, display, auto in STEP_COLS:
+            icon = "&#9889;" if auto else "&#9997;"
+            cols.append(
+                f"<th style='padding:6px 4px;font-size:12px;text-align:center;"
+                f"white-space:nowrap;'>{icon}<br>{display}</th>"
+            )
+        return "<tr style='background:#eee;'>" + "".join(cols) + "</tr>"
+
+    def _status_cell(value: str) -> str:
+        """Render a single task status as a colored cell."""
+        if _is_task_complete(value):
+            return ("<td style='text-align:center;background:#d4edda;color:#155724;"
+                    "font-weight:bold;padding:4px;'>&#9989;</td>")
+        if value and value.lower() not in ("not sent", "no", "n/a", ""):
+            # In progress (has a value but not complete)
+            short = value[:15] + ".." if len(value) > 17 else value
+            return (f"<td style='text-align:center;background:#fff3cd;color:#856404;"
+                    f"padding:4px;font-size:11px;'>{short}</td>")
+        return ("<td style='text-align:center;background:#f8d7da;color:#721c24;"
+                "padding:4px;'>&#10060;</td>")
+
+    def _leader_row(page: dict) -> str:
+        name = _get_leader_name(page)
+        region = _get_region(page)
+        start = _get_start_date(page)
+        days_until = (start - today).days if start else 999
+
+        # Urgency coloring
+        if days_until < 0:
+            start_str = f"{start.strftime('%b %-d')}<br><small style='color:red;'>({-days_until}d ago)</small>"
+            row_bg = "#fff0f0"
+        elif days_until < config.OB_URGENT_DAYS:
+            start_str = f"{start.strftime('%b %-d')}<br><small style='color:red;'>({days_until}d)</small>"
+            row_bg = "#fff0f0"
+        elif days_until < config.OB_WARNING_DAYS:
+            start_str = f"{start.strftime('%b %-d')}<br><small style='color:#856404;'>({days_until}d)</small>"
+            row_bg = "#fffbe6"
+        elif start:
+            start_str = f"{start.strftime('%b %-d')}<br><small>({days_until}d)</small>"
+            row_bg = "#fff"
+        else:
+            start_str = "TBD"
+            row_bg = "#fff"
+
+        # Workshop
+        workshops = (ws_map or {}).get(name, [])
+        if workshops:
+            ws_parts = []
+            for w in workshops:
+                ws_parts.append(f"<small>{w['site']}<br>{w['day']} {w['time']}</small>")
+            ws_cell = "<br>".join(ws_parts)
+        else:
+            ws_cell = "<small style='color:#999;'>None</small>"
+
+        # Task cells
+        task_cells = []
+        for prop_name, _, _ in STEP_COLS:
+            val = _get_property_value(page, prop_name)
+            task_cells.append(_status_cell(val))
+
+        return (
+            f"<tr style='background:{row_bg};'>"
+            f"<td style='padding:6px 8px;white-space:nowrap;'><strong>{name}</strong></td>"
+            f"<td style='padding:6px 8px;text-align:center;'>{region}</td>"
+            f"<td style='padding:6px 8px;text-align:center;'>{start_str}</td>"
+            f"<td style='padding:6px 8px;'>{ws_cell}</td>"
+            + "".join(task_cells) +
+            "</tr>"
+        )
+
+    # Render each stage section
+    stage_labels = {
+        "Matched": ("&#127920; MATCHED", "#e8f0fe", "Waiting for background check to be sent"),
+        "Background Check Pending": ("&#128270; BACKGROUND CHECK PENDING", "#f3e5f5", "Checkr running — waiting for clearance"),
+        "Onboarding Setup": ("&#128736; ONBOARDING SETUP", "#fff8e1", "Access setup in progress — check manual tasks"),
+        "Training In Progress": ("&#127891; TRAINING IN PROGRESS", "#e8f5e9", "Waiting for training completion via Calendly"),
+        "ACTIVE": ("&#9989; ACTIVE", "#e8f5e9", "Fully onboarded and active"),
+    }
+
+    for stage in stage_order:
+        pages = by_stage.get(stage, [])
+        if not pages:
+            continue
+
+        label, bg, desc = stage_labels.get(stage, (stage, "#f5f5f5", ""))
+        # Sort by start date
+        pages.sort(key=lambda p: _get_start_date(p) or date.max)
+
+        # Count pending manual tasks in this stage
+        manual_pending = 0
+        for p in pages:
+            for prop_name, _, is_auto in STEP_COLS:
+                if not is_auto and not _is_task_complete(_get_property_value(p, prop_name)):
+                    manual_pending += 1
+
+        manual_note = f" &nbsp;|&nbsp; <strong style='color:#cc0000;'>{manual_pending} manual task(s) pending</strong>" if manual_pending else ""
+
+        html.append(
+            f"<h3 style='background:{bg};padding:10px 14px;margin:18px 0 0;border-radius:4px;'>"
+            f"{label} &mdash; {len(pages)} leader{'s' if len(pages) != 1 else ''}"
+            f"{manual_note}</h3>"
+        )
+        html.append(f"<p style='margin:2px 0 8px 14px;font-size:12px;color:#666;'>{desc}</p>")
+        html.append(
+            "<table style='border-collapse:collapse;width:100%;font-size:13px;' border='1' cellpadding='0' cellspacing='0'>"
+        )
+        html.append(_header_row())
+        for p in pages:
+            html.append(_leader_row(p))
+        html.append("</table>")
+
+    if other_stage:
+        html.append(f"<p style='margin:18px 0;color:#888;'>{len(other_stage)} leader(s) in other stages (not shown)</p>")
+
+    # Legend
+    html.append(
+        "<div style='margin:20px 0;padding:12px;background:#f5f5f5;border-radius:4px;font-size:12px;'>"
+        "<strong>Legend:</strong><br>"
+        "&#9989; = Complete &nbsp;&nbsp; &#10060; = Not started &nbsp;&nbsp; "
+        "<span style='background:#fff3cd;padding:2px 6px;'>In progress</span> = Started but not done<br>"
+        "&#9889; = Auto-handled by system &nbsp;&nbsp; &#9997; = Needs manual team action"
+        "</div>"
+    )
+
+    html.append("<p style='color:#999;font-size:11px;'>Generated by Kodely Onboarding Automation</p>")
+    html.append("</body></html>")
+    return "\n".join(html)
+
+
+def send_digest_email(html: str, subject: str) -> None:
+    """Send the onboarding digest email via SMTP (same pattern as email_digest.py)."""
+    to_addrs = [a.strip() for a in config.EMAIL_TO.split(",") if a.strip()]
+    cc_addrs = [a.strip() for a in getattr(config, "EMAIL_CC", "").split(",") if a.strip()]
+    all_recipients = to_addrs + cc_addrs
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = config.EMAIL_FROM
+    msg["To"] = ", ".join(to_addrs)
+    if cc_addrs:
+        msg["Cc"] = ", ".join(cc_addrs)
+    msg.attach(MIMEText(html, "html"))
+
+    context = ssl.create_default_context(cafile=certifi.where())
+    with smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT, timeout=30) as server:
+        server.starttls(context=context)
+        server.login(config.SMTP_USER, config.SMTP_PASSWORD)
+        server.sendmail(config.EMAIL_FROM, all_recipients, msg.as_string())
+
+    log.info("Onboarding digest email sent to %s (cc: %s)",
+             ", ".join(to_addrs), ", ".join(cc_addrs) or "none")
 
 
 # ---------------------------------------------------------------------------
@@ -642,33 +1247,65 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="Print, don't post")
     parser.add_argument("--digest-only", action="store_true", help="Only run the morning digest")
     parser.add_argument("--compliance-only", action="store_true", help="Only run compliance checks")
+    parser.add_argument("--email", action="store_true", help="Send HTML email in addition to Slack")
+    parser.add_argument("--email-only", action="store_true", help="Send HTML email only (no Slack)")
     args = parser.parse_args()
 
     run_digest = not args.compliance_only
     run_compliance = not args.digest_only
+    send_slack = not args.email_only
+    send_html = args.email or args.email_only
 
     slack = SlackClient(token=config.SLACK_BOT_TOKEN)
-    leaders = query_onboarding_leaders()
+    leaders = _dedup_leaders(query_onboarding_leaders())
 
     if not leaders:
         log.info("No onboarding leaders found. Exiting.")
         return
 
+    # --- Load Google Sheets for workshop lookup + color sync ---
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    gs_creds = ServiceCredentials.from_service_account_file(
+        config.GOOGLE_CREDENTIALS_PATH, scopes=scopes
+    )
+    gc = gspread.authorize(gs_creds)
+    spreadsheet = gc.open_by_key(config.GOOGLE_SHEET_ID)
+    sheet = _get_worksheet_by_gid(spreadsheet, config.SHEET_GID)
+    sheet_data = sheet.get_all_values()
+    log.info("Loaded %d rows from Ops Hub", len(sheet_data))
+
+    ws_map = build_workshop_map(sheet_data, leaders)
+
     # --- Daily Digest ---
     if run_digest:
         log.info("Building daily digest for %d leaders...", len(leaders))
-        digest_msg = build_digest_message(leaders)
 
-        if args.dry_run:
-            print("--- DRY RUN: DAILY DIGEST (#ops-onboarding) ---")
-            print(digest_msg)
-            print()
-        else:
-            try:
-                post_to_slack(slack, config.SLACK_ONBOARDING_CHANNEL, digest_msg)
-                log.info("Posted daily digest to #ops-onboarding")
-            except Exception:
-                log.exception("Failed to post daily digest")
+        if send_slack:
+            digest_msg = build_digest_message(leaders, ws_map=ws_map)
+            if args.dry_run:
+                print("--- DRY RUN: DAILY DIGEST (#ops-onboarding) ---")
+                print(digest_msg)
+                print()
+            else:
+                try:
+                    post_to_slack(slack, config.SLACK_ONBOARDING_CHANNEL, digest_msg)
+                    log.info("Posted daily digest to #ops-onboarding")
+                except Exception:
+                    log.exception("Failed to post daily digest")
+
+        if send_html:
+            subject = f"Kodely Onboarding Report — {date.today().strftime('%b %d, %Y')}"
+            html = build_digest_email_html(leaders, ws_map=ws_map)
+            if args.dry_run:
+                print("--- DRY RUN: ONBOARDING EMAIL ---")
+                print(f"Subject: {subject}")
+                print(html)
+                print()
+            else:
+                try:
+                    send_digest_email(html, subject)
+                except Exception:
+                    log.exception("Failed to send onboarding digest email")
 
     # --- Compliance Checks ---
     if run_compliance:
@@ -688,19 +1325,6 @@ def main() -> None:
                         post_to_slack(slack, config.SLACK_ONBOARDING_CHANNEL, alert)
                     except Exception:
                         log.exception("Failed to post compliance alert")
-        else:
-            log.info("No new compliance alerts.")
-
-        # --- Init Google Sheets for Ops Hub color sync ---
-        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-        gs_creds = ServiceCredentials.from_service_account_file(
-            config.GOOGLE_CREDENTIALS_PATH, scopes=scopes
-        )
-        gc = gspread.authorize(gs_creds)
-        spreadsheet = gc.open_by_key(config.GOOGLE_SHEET_ID)
-        sheet = _get_worksheet_by_gid(spreadsheet, config.SHEET_GID)
-        sheet_data = sheet.get_all_values()
-        log.info("Loaded %d rows from Ops Hub for color sync", len(sheet_data))
 
         # --- Pipeline Auto-Advance ---
         log.info("Checking pipeline transitions for %d leaders...", len(leaders))
@@ -714,6 +1338,11 @@ def main() -> None:
             log.info("Advanced %d leader(s) in pipeline: %s", len(transitions), "; ".join(transitions))
         else:
             log.info("No pipeline transitions.")
+
+        # --- Catch-up hooks for manually moved cards ---
+        catchups = catch_up_hooks(leaders, digest_state, slack, dry_run=args.dry_run)
+        if catchups:
+            log.info("Catch-up hooks fired for %d leader(s): %s", len(catchups), "; ".join(catchups))
 
         if not args.dry_run:
             save_digest_state(digest_state)

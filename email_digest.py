@@ -688,7 +688,12 @@ def main() -> None:
     gc = gspread.authorize(creds)
 
     candidates = get_matchable_candidates()
-    form_candidates = get_form_candidates(gc)
+    try:
+        form_candidates = get_form_candidates(gc)
+    except PermissionError:
+        log.warning("No access to Form Responses sheet — skipping form candidates. "
+                    "Share the sheet with the service account to include them.")
+        form_candidates = []
     all_candidates = candidates + form_candidates
     workshops = get_gap_workshops(gc, creds)
     matches = find_matches(all_candidates, workshops)
