@@ -536,6 +536,10 @@ def send_training_email_followups(
     urgent_leaders = buckets["overdue"] + buckets["this_week"] + buckets["next_week"]
 
     for entry in urgent_leaders:
+        # Skip returning leaders — they don't get email follow-ups
+        if entry.get("is_returning"):
+            continue
+
         email = entry.get("email", "").strip()
         if not email:
             continue
