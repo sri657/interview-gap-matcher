@@ -198,6 +198,7 @@ PIPELINE_STAGES = [
     "Onboarding Setup",
     "Training In Progress",
     "ACTIVE",
+    "Needs Review",
 ]
 
 # Fields required to be complete for Onboarding Setup → Training In Progress
@@ -210,6 +211,7 @@ OB_ACCESS_FIELDS = [
 
 # Training status (Notion select field)
 OB_TRAINING_STATUS_PROPERTY = "Training Status"
+OB_TRAINING_OUTCOME_PROPERTY = "Training Outcome"
 
 # Ops Hub cell colors (Google Sheets API RGB 0-1 scale)
 CELL_COLOR_ORANGE = {"red": 1.0, "green": 0.6, "blue": 0.0}       # Matched

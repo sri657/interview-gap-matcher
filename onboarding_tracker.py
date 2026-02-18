@@ -323,8 +323,30 @@ def _update_returning_leader_page(
     """Update an existing Notion page for a returning leader.
 
     Clears trainer assignment, sets status to Onboarding Setup,
-    flags as returning leader, and updates school/region/start date.
+    flags as returning leader, merges school teaching, and checks compliance recency.
     """
+    # --- Fetch existing page data for merge + compliance check ---
+    existing_resp = httpx.get(
+        f"{NOTION_BASE}/pages/{page_id}",
+        headers=NOTION_HEADERS,
+        timeout=30,
+    )
+    existing_page = existing_resp.json() if existing_resp.status_code < 400 else {}
+    existing_props = existing_page.get("properties", {})
+
+    # --- Issue 2: Merge School Teaching instead of overwrite ---
+    existing_schools = set()
+    school_prop = existing_props.get("School Teaching", {})
+    if school_prop.get("type") == "multi_select":
+        for opt in school_prop.get("multi_select", []):
+            name = opt.get("name", "").strip()
+            if name:
+                existing_schools.add(name)
+    if site:
+        existing_schools.add(site)
+    merged_schools = [{"name": s} for s in sorted(existing_schools)]
+    log.info("Merging School Teaching for %s: %s", page_id, [s["name"] for s in merged_schools])
+
     start_date_iso = None
     parsed = _parse_date(start_date_str)
     if parsed:
@@ -334,7 +356,7 @@ def _update_returning_leader_page(
         "Readiness Status": {"select": {"name": "Onboarding Setup"}},
         "Returning Leader?": {"select": {"name": "Yes"}},
         "Trainer Assigned": {"select": None},
-        "School Teaching": {"multi_select": [{"name": site}]},
+        "School Teaching": {"multi_select": merged_schools},
         # Clear welcome email so they receive the returning leader welcome email
         config.OB_ONBOARDING_EMAIL_PROPERTY: {"status": {"name": "No"}},
         # Clear stale Training Status so Calendly recency check runs fresh
@@ -344,6 +366,40 @@ def _update_returning_leader_page(
         properties["Region"] = {"select": {"name": region}}
     if start_date_iso:
         properties["Start Date"] = {"date": {"start": start_date_iso}}
+
+    # --- Issue 3: Compliance recency check for returning leaders ---
+    existing_compliance = ""
+    comp_prop = existing_props.get(config.OB_COMPLIANCE_STATUS_PROPERTY, {})
+    if comp_prop.get("type") == "select" and comp_prop.get("select"):
+        existing_compliance = comp_prop["select"].get("name", "")
+
+    if existing_compliance in ("Cleared", "Complete", "Done"):
+        # Check if last Checkr was recent (within 1 year)
+        leader_email = ""
+        email_prop = existing_props.get("Email", {})
+        if email_prop.get("type") == "email":
+            leader_email = (email_prop.get("email") or "").strip()
+        leader_name = ""
+        for prop in existing_props.values():
+            if prop.get("type") == "title":
+                parts = prop.get("title", [])
+                leader_name = "".join(t.get("plain_text", "") for t in parts)
+                break
+
+        if leader_email or leader_name:
+            try:
+                from checkr_sync import check_existing_checkr
+                recent = check_existing_checkr(leader_email, name=leader_name)
+                if recent == "clear":
+                    log.info("Returning leader %s has recent Checkr — keeping compliance Cleared", page_id)
+                else:
+                    log.info("Returning leader %s has NO recent Checkr — resetting compliance to Not Sent", page_id)
+                    properties[config.OB_COMPLIANCE_STATUS_PROPERTY] = {"select": {"name": "Not Sent"}}
+            except Exception:
+                log.warning("Could not check Checkr recency for returning leader %s", page_id)
+        else:
+            log.warning("No email/name for Checkr recency check on returning leader %s — resetting compliance", page_id)
+            properties[config.OB_COMPLIANCE_STATUS_PROPERTY] = {"select": {"name": "Not Sent"}}
 
     resp = httpx.patch(
         f"{NOTION_BASE}/pages/{page_id}",
@@ -402,22 +458,7 @@ def create_onboarding_page(
     Returns (page_url, is_returning). If a page already exists the leader is
     treated as returning: their card is updated instead of creating a new one.
     """
-    existing = _find_existing_onboarding_page(leader_name)
-    if existing:
-        page_id, page_url = existing
-        log.info("Returning leader %s — updating existing Notion page", leader_name)
-        url = _update_returning_leader_page(page_id, region, site, start_date_str)
-        # Append new assignment details as a comment block on the existing page
-        if event:
-            _append_assignment_blocks(page_id, event)
-        return url or page_url, True
-
-    start_date_iso = None
-    parsed = _parse_date(start_date_str)
-    if parsed:
-        start_date_iso = parsed.isoformat()
-
-    # Look up email: first from the cell itself, then from Form Responses sheet
+    # --- Resolve email FIRST (needed for email-based fallback search) ---
     leader_email = None
     if event and event.get("leader_email"):
         leader_email = event["leader_email"]
@@ -440,6 +481,45 @@ def create_onboarding_page(
                 log.info("Auto-filled email for %s: %s", leader_name, leader_email)
         except Exception:
             log.warning("Could not load form emails for auto-fill")
+
+    # --- Search for existing card: name match, then email fallback ---
+    existing = _find_existing_onboarding_page(leader_name)
+    if not existing and leader_email:
+        # Pass 3: email-based fallback — catches cases where fuzzy name match fails
+        from calendly_sync import _find_page_by_email
+        existing = _find_page_by_email(leader_email)
+        if existing:
+            log.info("Found existing card for %s via email fallback (%s)", leader_name, leader_email)
+
+    # --- Issue 5: Race condition guard — check onboarded.json for recent creates ---
+    if not existing:
+        state = load_state()
+        name_lower = leader_name.strip().lower()
+        for key in state:
+            if key.lower().startswith(name_lower + "::") and "::orange" in key.lower():
+                log.info("Race guard: found recent state entry for %s, retrying search", leader_name)
+                # One more aggressive search using both name and email
+                existing = _find_existing_onboarding_page(leader_name)
+                if not existing and leader_email:
+                    from calendly_sync import _find_page_by_email
+                    existing = _find_page_by_email(leader_email)
+                if existing:
+                    log.info("Race guard: found card on retry for %s", leader_name)
+                break
+
+    if existing:
+        page_id, page_url = existing
+        log.info("Returning leader %s — updating existing Notion page", leader_name)
+        url = _update_returning_leader_page(page_id, region, site, start_date_str)
+        # Append new assignment details as a comment block on the existing page
+        if event:
+            _append_assignment_blocks(page_id, event)
+        return url or page_url, True
+
+    start_date_iso = None
+    parsed = _parse_date(start_date_str)
+    if parsed:
+        start_date_iso = parsed.isoformat()
 
     properties: dict = {
         "": {"title": [{"text": {"content": leader_name}}]},

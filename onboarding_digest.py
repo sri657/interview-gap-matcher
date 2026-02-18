@@ -131,6 +131,7 @@ _STAGE_PRIORITY = {
     "Onboarding": 2,
     "Training In Progress": 3,
     "ACTIVE": 4,
+    "Needs Review": 5,
 }
 
 
@@ -165,6 +166,7 @@ def query_onboarding_leaders() -> list[dict]:
             {"property": "Readiness Status", "select": {"equals": "Training In Progress"}},
             {"property": "Readiness Status", "select": {"equals": "ACTIVE"}},
             {"property": "Readiness Status", "select": {"equals": "Onboarding"}},
+            {"property": "Readiness Status", "select": {"equals": "Needs Review"}},
         ],
     }
     results = []
@@ -310,13 +312,18 @@ _TRANSITION_MESSAGES = {
     "Onboarding Setup": "Background check cleared — ready for access setup.",
     "Training In Progress": "All onboarding access granted — waiting on training.",
     "ACTIVE": "Training complete — please set up Gusto for this leader.",
+    "Needs Review": "Training outcome requires manual review.",
 }
+
+# Special signal returned by _check_transition to indicate a rebook is needed
+_REBOOK_SIGNAL = "_rebook"
 
 
 def _check_transition(page: dict, org_uri: str | None = None) -> tuple[str, str] | None:
     """Determine if a page should advance to the next pipeline stage.
 
     Returns (new_stage, message) or None if no transition applies.
+    Special: returns (_REBOOK_SIGNAL, message) when a Fail 1 rebook is needed.
     """
     status = _get_property_value(page, "Readiness Status")
 
@@ -354,8 +361,19 @@ def _check_transition(page: dict, org_uri: str | None = None) -> tuple[str, str]
             return "Training In Progress", _TRANSITION_MESSAGES["Training In Progress"]
 
     elif status == "Training In Progress":
+        # --- Trainer Outcome routing (new process) ---
+        outcome = _get_property_value(page, config.OB_TRAINING_OUTCOME_PROPERTY)
+
+        if outcome == "Pass":
+            return "ACTIVE", "Training outcome: Pass — leader is ready."
+        if outcome in ("Fail 2", "No-Show"):
+            return "Needs Review", f"Training outcome: {outcome} — manual review required."
+        if outcome == "Fail 1":
+            return _REBOOK_SIGNAL, "Training outcome: Fail 1 — rebooking training."
+
+        # Legacy fallback: Training Status = Complete without outcome → ACTIVE
         training_val = _get_property_value(page, config.OB_TRAINING_STATUS_PROPERTY)
-        if _is_task_complete(training_val):
+        if _is_task_complete(training_val) and not outcome:
             return "ACTIVE", _TRANSITION_MESSAGES["ACTIVE"]
 
     return None
@@ -502,6 +520,59 @@ def _update_cell_color(
         log.info("Updated cell color at row=%d col=%d", row, col)
 
 
+def _send_rebook_email(name: str, email: str) -> bool:
+    """Send a training rebook email with Calendly booking link.
+
+    Returns True on success. Respects EMAILS_ENABLED kill switch.
+    """
+    if not config.EMAILS_ENABLED:
+        log.info("EMAIL PAUSED (kill switch): would send rebook email to %s (%s)", name, email)
+        return False
+
+    if not email:
+        log.warning("No email for %s — cannot send rebook email", name)
+        return False
+
+    import smtplib as _smtplib
+    from email.mime.multipart import MIMEMultipart as _MIMEMultipart
+    from email.mime.text import MIMEText as _MIMEText
+
+    subject = "Let's Schedule Another Training Session"
+    html = f"""\
+<html><body style="font-family:Arial,sans-serif;max-width:600px;margin:auto;">
+<p>Hi {name},</p>
+<p>We'd like to schedule another training session with you. Please use the link below
+to book a time that works:</p>
+<p style="text-align:center;margin:24px 0;">
+  <a href="{config.CALENDLY_BOOKING_URL}"
+     style="background:#4A90D9;color:#fff;padding:12px 28px;text-decoration:none;
+            border-radius:6px;font-weight:bold;display:inline-block;">
+    Book Training Session
+  </a>
+</p>
+<p>If you have any questions, feel free to reply to this email.</p>
+<p>Best,<br>Kodely Talent Team</p>
+</body></html>"""
+
+    msg = _MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = config.EMAIL_FROM
+    msg["To"] = email
+    msg.attach(_MIMEText(html, "html"))
+
+    context = ssl.create_default_context(cafile=certifi.where())
+    try:
+        with _smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT, timeout=30) as server:
+            server.starttls(context=context)
+            server.login(config.SMTP_USER, config.SMTP_PASSWORD)
+            server.sendmail(config.EMAIL_FROM, [email], msg.as_string())
+        log.info("Sent rebook email to %s (%s)", name, email)
+        return True
+    except Exception:
+        log.exception("Failed to send rebook email to %s (%s)", name, email)
+        return False
+
+
 def _run_transition_hooks(page: dict, new_stage: str, slack: "SlackClient") -> None:
     """Fire automation hooks when a leader transitions to a new pipeline stage.
 
@@ -509,6 +580,7 @@ def _run_transition_hooks(page: dict, new_stage: str, slack: "SlackClient") -> N
     try/except so a failure in one doesn't block others.
     """
     name = _get_leader_name(page)
+    page_id = page.get("id", "")
 
     if new_stage == "Onboarding Setup":
         # Leader just cleared background check → send welcome email, provision Slack,
@@ -527,7 +599,7 @@ def _run_transition_hooks(page: dict, new_stage: str, slack: "SlackClient") -> N
         # Mark lesson plan as sent (auto-included in welcome email resources)
         try:
             resp = httpx.patch(
-                f"{NOTION_BASE}/pages/{page.get('id', '')}",
+                f"{NOTION_BASE}/pages/{page_id}",
                 headers=NOTION_HEADERS,
                 json={"properties": {config.OB_LESSON_PLAN_PROPERTY: {"select": {"name": "Sent"}}}},
                 timeout=30,
@@ -545,6 +617,229 @@ def _run_transition_hooks(page: dict, new_stage: str, slack: "SlackClient") -> N
             except Exception:
                 log.exception("Hook: trainer notes failed for %s", name)
 
+    elif new_stage == "ACTIVE":
+        # Mark Gusto as Done in Notion
+        try:
+            resp = httpx.patch(
+                f"{NOTION_BASE}/pages/{page_id}",
+                headers=NOTION_HEADERS,
+                json={"properties": {config.OB_GUSTO_PROPERTY: {"select": {"name": "Done"}}}},
+                timeout=30,
+            )
+            if resp.status_code < 400:
+                log.info("Hook: Gusto marked Done for %s", name)
+        except Exception:
+            log.exception("Hook: Gusto mark failed for %s", name)
+
+        # Post celebration alert
+        try:
+            msg = (
+                f":tada: LEADER ACTIVATED\n\n"
+                f"*Leader:* {name}\n\n"
+                f"All onboarding steps complete — please add to Gusto."
+            )
+            post_to_slack(slack, config.SLACK_ONBOARDING_CHANNEL, msg)
+        except Exception:
+            log.exception("Hook: ACTIVE celebration alert failed for %s", name)
+
+    elif new_stage == "Needs Review":
+        # Post review alert
+        outcome = _get_property_value(page, config.OB_TRAINING_OUTCOME_PROPERTY)
+        try:
+            msg = (
+                f":rotating_light: NEEDS REVIEW\n\n"
+                f"*Leader:* {name}\n"
+                f"*Training Outcome:* {outcome}\n\n"
+                f"Manual review required."
+            )
+            post_to_slack(slack, config.SLACK_ONBOARDING_CHANNEL, msg)
+        except Exception:
+            log.exception("Hook: Needs Review alert failed for %s", name)
+
+
+def _process_one_transition(
+    page: dict,
+    state: dict,
+    slack: "SlackClient",
+    dry_run: bool,
+    sheet_data: list[list[str]] | None,
+    creds: ServiceCredentials | None,
+    org_uri: str | None,
+    messages: list[str],
+) -> bool:
+    """Process a single pipeline transition for one leader.
+
+    Returns True if a transition happened (for fast-advance re-evaluation).
+    """
+    page_id = page.get("id", "")
+    name = _get_leader_name(page)
+    region = _get_region(page)
+
+    if not name:
+        return False
+
+    # --- Issue 4: Missing email check ---
+    current_stage = _get_property_value(page, "Readiness Status")
+    if current_stage in ("Background Check Pending", "Onboarding Setup", "Training In Progress"):
+        email = _get_leader_email(page)
+        if not email:
+            missing_key = f"missing_email_{page_id}"
+            if not state.get(missing_key):
+                if dry_run:
+                    print(f"--- DRY RUN: MISSING EMAIL ---")
+                    print(f"  :warning: {name} ({current_stage}) — no email on file")
+                    print(f"  Would post alert and skip advancement")
+                    print()
+                else:
+                    try:
+                        msg = (
+                            f":warning: MISSING EMAIL\n\n"
+                            f"*Leader:* {name}\n"
+                            f"*Stage:* {current_stage}\n\n"
+                            f"No email on file — cannot advance pipeline. Please add email to Notion card."
+                        )
+                        post_to_slack(slack, config.SLACK_ONBOARDING_CHANNEL, msg)
+                    except Exception:
+                        log.exception("Failed to post missing email alert for %s", name)
+                state[missing_key] = True
+            return False
+
+    result = _check_transition(page, org_uri=org_uri)
+    if result is None:
+        return False
+
+    new_stage, reason = result
+
+    # --- Handle rebook (Fail 1) ---
+    if new_stage == _REBOOK_SIGNAL:
+        rebook_key = f"rebook_{page_id}"
+        if state.get(rebook_key):
+            return False
+
+        email = _get_leader_email(page)
+        if dry_run:
+            print(f"--- DRY RUN: TRAINING REBOOK ---")
+            print(f"  {name} ({region}): Fail 1 — would clear trainer & rebook")
+            print(f"  Would send rebook email to {email or '(no email)'}")
+            print()
+        else:
+            # Clear Trainer Assigned, Training Status, Training Outcome
+            try:
+                httpx.patch(
+                    f"{NOTION_BASE}/pages/{page_id}",
+                    headers=NOTION_HEADERS,
+                    json={"properties": {
+                        "Trainer Assigned": {"select": None},
+                        config.OB_TRAINING_STATUS_PROPERTY: {"select": None},
+                        config.OB_TRAINING_OUTCOME_PROPERTY: {"select": None},
+                    }},
+                    timeout=30,
+                )
+                log.info("Rebook: cleared trainer/training for %s", name)
+            except Exception:
+                log.exception("Rebook: failed to clear Notion properties for %s", name)
+
+            # Send rebook email
+            if email:
+                _send_rebook_email(name, email)
+
+            # Post Slack alert
+            try:
+                msg = (
+                    f":arrows_counterclockwise: TRAINING REBOOK\n\n"
+                    f"*Leader:* {name}\n"
+                    f"*Outcome:* Fail 1 — trainer cleared, booking link re-sent.\n"
+                    f"Leader will rebook training via Calendly."
+                )
+                post_to_slack(slack, config.SLACK_ONBOARDING_CHANNEL, msg)
+            except Exception:
+                log.exception("Failed to post rebook alert for %s", name)
+
+            messages.append(f"{name}: Fail 1 → rebook")
+
+        state[rebook_key] = True
+        return False  # Not a stage transition, so no fast-advance
+
+    # --- Normal pipeline advance ---
+    pipeline_key = f"pipeline_{page_id}_{new_stage}"
+    if state.get(pipeline_key):
+        return False
+
+    if dry_run:
+        print(f"--- DRY RUN: PIPELINE ADVANCE ---")
+        print(f"  {name} ({region}): {current_stage} → {new_stage}")
+        print(f"  Reason: {reason}")
+        if sheet_data:
+            workshops = _get_leader_workshops(sheet_data, name)
+            if workshops:
+                print(f"  Workshop(s):")
+                for ws in workshops:
+                    parts = [ws.get("site", ""), ws.get("day", ""), ws.get("time", ""), ws.get("lesson", "")]
+                    print(f"    • {' | '.join(p for p in parts if p)}")
+            else:
+                print(f"  Workshop(s): NONE found in Ops Hub")
+        color = _STAGE_COLOR_MAP.get(new_stage)
+        if color and sheet_data:
+            cells = _find_leader_cells(sheet_data, name)
+            print(f"  Color sync: would update {len(cells)} cell(s) to {new_stage} color")
+        print()
+    else:
+        if not _patch_readiness_status(page_id, new_stage):
+            return False
+
+        # Sync Ops Hub cell color if this transition has a color mapping
+        color = _STAGE_COLOR_MAP.get(new_stage)
+        if color and sheet_data and creds:
+            cells = _find_leader_cells(sheet_data, name)
+            for r, c in cells:
+                try:
+                    _update_cell_color(creds, r, c, color)
+                except Exception:
+                    log.exception("Failed to update cell color for %s at (%d,%d)", name, r, c)
+
+        # Look up workshop assignments so the team knows what to onboard for
+        workshop_lines = ""
+        if sheet_data:
+            workshops = _get_leader_workshops(sheet_data, name)
+            if workshops:
+                workshop_lines = "\n\n\U0001f3eb Workshop Assignment(s):\n"
+                for ws in workshops:
+                    parts = []
+                    if ws.get("site"):
+                        parts.append(ws["site"])
+                    if ws.get("day"):
+                        parts.append(ws["day"])
+                    if ws.get("time"):
+                        parts.append(ws["time"])
+                    if ws.get("lesson"):
+                        parts.append(f"Lesson: {ws['lesson']}")
+                    if ws.get("district"):
+                        parts.append(f"({ws['district']})")
+                    workshop_lines += f"  • {' | '.join(parts)}\n"
+            else:
+                workshop_lines = "\n\n\u26a0\ufe0f No workshop assignment found in Ops Hub yet."
+
+        msg = (
+            f"\U0001f4ca PIPELINE UPDATE\n\n"
+            f"Leader: {name} \u2192 {new_stage}\n"
+            f"Region: {region}\n"
+            f"{reason}"
+            f"{workshop_lines}"
+        )
+        try:
+            post_to_slack(slack, config.SLACK_ONBOARDING_CHANNEL, msg)
+            log.info("Pipeline: %s moved to %s", name, new_stage)
+        except Exception:
+            log.exception("Failed to post pipeline update for %s", name)
+
+        # --- Automation hooks on transition ---
+        _run_transition_hooks(page, new_stage, slack)
+
+        messages.append(f"{name}: {current_stage} → {new_stage}")
+
+    state[pipeline_key] = True
+    return True
+
 
 def advance_pipeline(
     leaders: list[dict],
@@ -558,102 +853,24 @@ def advance_pipeline(
     """Check each leader for pipeline transitions and advance if conditions are met.
 
     Returns list of transition messages. Updates state dict to track notified transitions.
+    Includes fast-advance: after all transitions, re-queries Notion and runs a second pass
+    so cards can move through multiple stages in one run.
     """
     messages = []
 
     for page in leaders:
-        page_id = page.get("id", "")
-        name = _get_leader_name(page)
-        region = _get_region(page)
+        _process_one_transition(page, state, slack, dry_run, sheet_data, creds, org_uri, messages)
 
-        if not name:
-            continue
-
-        result = _check_transition(page, org_uri=org_uri)
-        if result is None:
-            continue
-
-        new_stage, reason = result
-        current_stage = _get_property_value(page, "Readiness Status")
-
-        # Deduplicate: don't re-advance if we already moved this page in a previous run
-        pipeline_key = f"pipeline_{page_id}_{new_stage}"
-        if state.get(pipeline_key):
-            continue
-
-        if dry_run:
-            print(f"--- DRY RUN: PIPELINE ADVANCE ---")
-            print(f"  {name} ({region}): {current_stage} → {new_stage}")
-            print(f"  Reason: {reason}")
-            if sheet_data:
-                workshops = _get_leader_workshops(sheet_data, name)
-                if workshops:
-                    print(f"  Workshop(s):")
-                    for ws in workshops:
-                        parts = [ws.get("site", ""), ws.get("day", ""), ws.get("time", ""), ws.get("lesson", "")]
-                        print(f"    • {' | '.join(p for p in parts if p)}")
-                else:
-                    print(f"  Workshop(s): NONE found in Ops Hub")
-            color = _STAGE_COLOR_MAP.get(new_stage)
-            if color and sheet_data:
-                cells = _find_leader_cells(sheet_data, name)
-                print(f"  Color sync: would update {len(cells)} cell(s) to {new_stage} color")
-            print()
-        else:
-            if not _patch_readiness_status(page_id, new_stage):
-                continue
-
-            # Sync Ops Hub cell color if this transition has a color mapping
-            color = _STAGE_COLOR_MAP.get(new_stage)
-            if color and sheet_data and creds:
-                cells = _find_leader_cells(sheet_data, name)
-                for r, c in cells:
-                    try:
-                        _update_cell_color(creds, r, c, color)
-                    except Exception:
-                        log.exception("Failed to update cell color for %s at (%d,%d)", name, r, c)
-
-            # Look up workshop assignments so the team knows what to onboard for
-            workshop_lines = ""
-            if sheet_data:
-                workshops = _get_leader_workshops(sheet_data, name)
-                if workshops:
-                    workshop_lines = "\n\n\U0001f3eb Workshop Assignment(s):\n"
-                    for ws in workshops:
-                        parts = []
-                        if ws.get("site"):
-                            parts.append(ws["site"])
-                        if ws.get("day"):
-                            parts.append(ws["day"])
-                        if ws.get("time"):
-                            parts.append(ws["time"])
-                        if ws.get("lesson"):
-                            parts.append(f"Lesson: {ws['lesson']}")
-                        if ws.get("district"):
-                            parts.append(f"({ws['district']})")
-                        workshop_lines += f"  • {' | '.join(parts)}\n"
-                else:
-                    workshop_lines = "\n\n\u26a0\ufe0f No workshop assignment found in Ops Hub yet."
-
-            msg = (
-                f"\U0001f4ca PIPELINE UPDATE\n\n"
-                f"Leader: {name} \u2192 {new_stage}\n"
-                f"Region: {region}\n"
-                f"{reason}"
-                f"{workshop_lines}"
-            )
-            try:
-                post_to_slack(slack, config.SLACK_ONBOARDING_CHANNEL, msg)
-                log.info("Pipeline: %s moved to %s", name, new_stage)
-            except Exception:
-                log.exception("Failed to post pipeline update for %s", name)
-
-            # --- Automation hooks on transition ---
-            _run_transition_hooks(page, new_stage, slack)
-
-            messages.append(f"{name}: {current_stage} → {new_stage}")
-
-        state[pipeline_key] = True
+    # --- Part C: Pipeline fast-advance (second pass) ---
+    if not dry_run and messages:
+        log.info("Fast-advance: re-querying Notion for second pass...")
+        fresh_leaders = _dedup_leaders(query_onboarding_leaders())
+        second_pass_count = 0
+        for page in fresh_leaders:
+            if _process_one_transition(page, state, slack, dry_run, sheet_data, creds, org_uri, messages):
+                second_pass_count += 1
+        if second_pass_count:
+            log.info("Fast-advance: %d additional transition(s) in second pass", second_pass_count)
 
     return messages
 
@@ -977,6 +1194,7 @@ def build_detailed_onboarding_report(
         (config.OB_WORKSHOP_SLACK_PROPERTY, "Workshop Slack", False),
         (config.OB_GUSTO_PROPERTY, "Gusto", False),
         (config.OB_TRAINING_STATUS_PROPERTY, "Training", True),
+        (config.OB_TRAINING_OUTCOME_PROPERTY, "Outcome", True),
     ]
 
     # Group leaders by pipeline stage
@@ -986,6 +1204,7 @@ def build_detailed_onboarding_report(
         "Onboarding Setup",
         "Training In Progress",
         "ACTIVE",
+        "Needs Review",
     ]
     by_stage: dict[str, list[dict]] = {s: [] for s in stage_order}
     other_stage: list[dict] = []
@@ -1097,6 +1316,7 @@ def build_detailed_onboarding_report(
         "Onboarding Setup": ("&#128736; ONBOARDING SETUP", "#fff8e1", "Access setup in progress — check manual tasks"),
         "Training In Progress": ("&#127891; TRAINING IN PROGRESS", "#e8f5e9", "Waiting for training completion via Calendly"),
         "ACTIVE": ("&#9989; ACTIVE", "#e8f5e9", "Fully onboarded and active"),
+        "Needs Review": ("&#128680; NEEDS REVIEW", "#fce4ec", "Training failed or no-show — manual review required"),
     }
 
     for stage in stage_order:
