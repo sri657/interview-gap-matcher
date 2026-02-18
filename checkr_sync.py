@@ -612,6 +612,10 @@ def _send_missing_email_alert(leaders_missing: list[tuple[str, str]]) -> None:
     if not leaders_missing:
         return
 
+    if not config.EMAILS_ENABLED:
+        log.info("EMAIL PAUSED (kill switch): would send missing-email alert for %d leader(s)", len(leaders_missing))
+        return
+
     from email.mime.multipart import MIMEMultipart
     from email.mime.text import MIMEText
 
@@ -659,6 +663,10 @@ def _send_sterling_alert(leaders_sterling: list[tuple[str, str, str]]) -> None:
     leaders_sterling: list of (name, email, page_id) tuples.
     """
     if not leaders_sterling:
+        return
+
+    if not config.EMAILS_ENABLED:
+        log.info("EMAIL PAUSED (kill switch): would send Sterling alert for %d leader(s)", len(leaders_sterling))
         return
 
     from email.mime.multipart import MIMEMultipart

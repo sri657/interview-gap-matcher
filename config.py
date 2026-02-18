@@ -139,6 +139,9 @@ SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
 SMTP_USER = os.environ.get("SMTP_USER", "")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
 
+# Global kill switch — set EMAILS_ENABLED=true in .env to allow outgoing emails/DMs
+EMAILS_ENABLED = os.environ.get("EMAILS_ENABLED", "false").lower() in ("true", "1", "yes")
+
 # ---------------------------------------------------------------------------
 # Google Sheet — Gap Matches output tab
 # ---------------------------------------------------------------------------
@@ -224,6 +227,7 @@ CALENDLY_TRAINING_EVENT_NAMES = [
     "feedback/expedited training",
 ]
 CALENDLY_STATE_PATH = os.path.join(os.path.dirname(__file__), "calendly_state.json")
+TRAINING_RECENCY_DAYS = int(os.environ.get("TRAINING_RECENCY_DAYS", "90"))
 CALENDLY_BOOKING_URL = "https://calendly.com/d/ck4y-gq8-nss/kodely-training-call-dress-rehearsal"
 
 # Expedited/feedback training event names (separate from regular training)

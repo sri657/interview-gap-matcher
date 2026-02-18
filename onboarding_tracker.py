@@ -337,6 +337,8 @@ def _update_returning_leader_page(
         "School Teaching": {"multi_select": [{"name": site}]},
         # Clear welcome email so they receive the returning leader welcome email
         config.OB_ONBOARDING_EMAIL_PROPERTY: {"status": {"name": "No"}},
+        # Clear stale Training Status so Calendly recency check runs fresh
+        config.OB_TRAINING_STATUS_PROPERTY: {"select": None},
     }
     if region:
         properties["Region"] = {"select": {"name": region}}

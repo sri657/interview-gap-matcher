@@ -391,6 +391,10 @@ def send_leader_reminders(
     Only reminds leaders whose start date is within the next 2 weeks or overdue.
     Deduplicates so each leader gets at most one DM per week.
     """
+    if not config.EMAILS_ENABLED:
+        log.info("EMAIL PAUSED (kill switch): would send leader training reminders")
+        return 0
+
     today = date.today()
     week_key = today.strftime("%Y-W%W")  # e.g. "2026-W06"
     reminded = 0
@@ -549,6 +553,10 @@ def build_email_html(
 
 def send_email(html: str, subject: str) -> None:
     """Send the training report email via SMTP (same pattern as email_digest.py)."""
+    if not config.EMAILS_ENABLED:
+        log.info("EMAIL PAUSED (kill switch): would send training report '%s'", subject)
+        return
+
     to_addrs = [a.strip() for a in config.EMAIL_TO.split(",") if a.strip()]
     cc_addrs = [a.strip() for a in getattr(config, "EMAIL_CC", "").split(",") if a.strip()]
     all_recipients = to_addrs + cc_addrs

@@ -649,6 +649,10 @@ def _build_html(
 
 def send_email(html: str, subject: str) -> None:
     """Send the digest email via SMTP."""
+    if not config.EMAILS_ENABLED:
+        log.info("EMAIL PAUSED (kill switch): would send gap digest '%s'", subject)
+        return
+
     to_addrs = [a.strip() for a in config.EMAIL_TO.split(",") if a.strip()]
     cc_addrs = [a.strip() for a in getattr(config, "EMAIL_CC", "").split(",") if a.strip()]
     all_recipients = to_addrs + cc_addrs

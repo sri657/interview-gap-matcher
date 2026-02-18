@@ -230,6 +230,18 @@ def _get_leader_name(page: dict) -> str:
     return ""
 
 
+def _get_leader_email(page: dict) -> str:
+    """Extract leader email from the Email property."""
+    props = page.get("properties", {})
+    email_prop = props.get("Email", {})
+    if email_prop.get("type") == "email":
+        return (email_prop.get("email") or "").strip().lower()
+    if email_prop.get("type") == "rich_text":
+        parts = email_prop.get("rich_text", [])
+        return "".join(t.get("plain_text", "") for t in parts).strip().lower()
+    return ""
+
+
 def _get_region(page: dict) -> str:
     return _get_property_value(page, "Region")
 
@@ -301,7 +313,7 @@ _TRANSITION_MESSAGES = {
 }
 
 
-def _check_transition(page: dict) -> tuple[str, str] | None:
+def _check_transition(page: dict, org_uri: str | None = None) -> tuple[str, str] | None:
     """Determine if a page should advance to the next pipeline stage.
 
     Returns (new_stage, message) or None if no transition applies.
@@ -323,10 +335,22 @@ def _check_transition(page: dict) -> tuple[str, str] | None:
 
     elif status == "Onboarding Setup":
         if _all_access_complete(page):
-            # Returning leaders already have training from before — skip to ACTIVE
+            # Check if Notion Training Status is already marked complete
             training_val = _get_property_value(page, config.OB_TRAINING_STATUS_PROPERTY)
             if _is_task_complete(training_val):
                 return "ACTIVE", "Returning leader — all access + training already complete."
+
+            # For returning leaders, check Calendly training recency
+            returning_val = _get_property_value(page, "Returning Leader?")
+            if returning_val == "Yes" and org_uri:
+                email = _get_leader_email(page)
+                if email:
+                    from calendly_sync import is_training_recent
+                    is_recent, last_date = is_training_recent(org_uri, email)
+                    if is_recent:
+                        date_str = last_date.strftime("%b %d, %Y") if last_date else "recently"
+                        return "ACTIVE", f"Returning leader — trained {date_str} (within {config.TRAINING_RECENCY_DAYS} days)."
+
             return "Training In Progress", _TRANSITION_MESSAGES["Training In Progress"]
 
     elif status == "Training In Progress":
@@ -529,6 +553,7 @@ def advance_pipeline(
     dry_run: bool = False,
     sheet_data: list[list[str]] | None = None,
     creds: ServiceCredentials | None = None,
+    org_uri: str | None = None,
 ) -> list[str]:
     """Check each leader for pipeline transitions and advance if conditions are met.
 
@@ -544,7 +569,7 @@ def advance_pipeline(
         if not name:
             continue
 
-        result = _check_transition(page)
+        result = _check_transition(page, org_uri=org_uri)
         if result is None:
             continue
 
@@ -1126,6 +1151,10 @@ def build_detailed_onboarding_report(
 
 def send_digest_email(html: str, subject: str) -> None:
     """Send the onboarding digest email via SMTP (same pattern as email_digest.py)."""
+    if not config.EMAILS_ENABLED:
+        log.info("EMAIL PAUSED (kill switch): would send onboarding digest '%s'", subject)
+        return
+
     to_addrs = [a.strip() for a in config.EMAIL_TO.split(",") if a.strip()]
     cc_addrs = [a.strip() for a in getattr(config, "EMAIL_CC", "").split(",") if a.strip()]
     all_recipients = to_addrs + cc_addrs
@@ -1328,11 +1357,22 @@ def main() -> None:
 
         # --- Pipeline Auto-Advance ---
         log.info("Checking pipeline transitions for %d leaders...", len(leaders))
+
+        # Fetch Calendly org URI for training recency checks
+        org_uri = None
+        try:
+            from calendly_sync import get_current_user
+            user = get_current_user()
+            org_uri = user["current_organization"]
+        except Exception:
+            log.warning("Could not connect to Calendly — training recency checks will be skipped")
+
         transitions = advance_pipeline(
             leaders, digest_state, slack,
             dry_run=args.dry_run,
             sheet_data=sheet_data,
             creds=gs_creds,
+            org_uri=org_uri,
         )
         if transitions:
             log.info("Advanced %d leader(s) in pipeline: %s", len(transitions), "; ".join(transitions))

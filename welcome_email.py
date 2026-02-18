@@ -307,7 +307,9 @@ def build_welcome_html(leader_name: str, start_date: str, region: str) -> str:
 # Returning Leader welcome email
 # ---------------------------------------------------------------------------
 
-def build_returning_welcome_html(leader_name: str, start_date: str, region: str) -> str:
+def build_returning_welcome_html(
+    leader_name: str, start_date: str, region: str, skip_training: bool = False,
+) -> str:
     """Build the HTML welcome-back email for returning leaders."""
     first_name = leader_name.split()[0] if leader_name.strip() else leader_name
     start_display = start_date if start_date else "TBD"
@@ -364,8 +366,8 @@ def build_returning_welcome_html(leader_name: str, start_date: str, region: str)
     A new lesson plan will be added to your account &mdash; be sure to review it before Day 1!
   </p>
 
-  <h3 style="color:#1a1a2e;margin:24px 0 8px;">3. Schedule Training</h3>
-  <p style="margin:4px 0 12px;">
+  <h3 style="color:#1a1a2e;margin:24px 0 8px;">3. Training</h3>
+  {"" if skip_training else f'''<p style="margin:4px 0 12px;">
     <a href="{returning_calendly}" style="color:#2563eb;text-decoration:none;font-weight:600;">
       Click here to schedule your Returning Leaders Training Check-In
     </a>
@@ -373,7 +375,9 @@ def build_returning_welcome_html(leader_name: str, start_date: str, region: str)
 
   <div style="background:#fef3c7;border-left:4px solid #f59e0b;padding:12px 16px;margin:20px 0;border-radius:4px;">
     <strong>Important:</strong> Training is required before you can begin at your school.
-  </div>
+  </div>'''}{"" if not skip_training else '''<div style="background:#d1fae5;border-left:4px solid #10b981;padding:12px 16px;margin:20px 0;border-radius:4px;">
+    Your previous training is still current &mdash; no additional session needed!
+  </div>'''}
 
   <p>That's it! Let us know if you have any questions or need support &mdash; we're here to help.</p>
 
@@ -402,6 +406,10 @@ def build_returning_welcome_html(leader_name: str, start_date: str, region: str)
 
 def send_welcome_email(to_email: str, leader_name: str, html: str, subject: str | None = None) -> bool:
     """Send the welcome email via SMTP. Returns True on success."""
+    if not config.EMAILS_ENABLED:
+        log.info("EMAIL PAUSED (kill switch): would send welcome email to %s", to_email)
+        return True
+
     from email.mime.multipart import MIMEMultipart
     from email.mime.text import MIMEText
 
@@ -481,7 +489,18 @@ def send_welcome_for_page(
         return True
 
     if is_returning:
-        html = build_returning_welcome_html(name, start_date, region)
+        # Check Calendly training recency — skip training link if recent
+        skip_training = False
+        try:
+            from calendly_sync import get_current_user, is_training_recent
+            user = get_current_user()
+            org_uri = user["current_organization"]
+            is_recent, _ = is_training_recent(org_uri, email)
+            skip_training = is_recent
+        except Exception:
+            log.warning("Could not check Calendly training recency for %s — including training link", name)
+
+        html = build_returning_welcome_html(name, start_date, region, skip_training=skip_training)
         subject = f"Welcome Back, {name.split()[0]}! – Confirm Your Upcoming Kodely Session"
     else:
         html = build_welcome_html(name, start_date, region)

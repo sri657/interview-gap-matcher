@@ -138,6 +138,79 @@ def fetch_event_host(event: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Training recency check
+# ---------------------------------------------------------------------------
+
+def get_last_training_date(org_uri: str, leader_email: str) -> datetime | None:
+    """Query Calendly for the most recent completed training event for a leader.
+
+    Looks back 6 months. Returns the end_time of the most recent completed
+    training event, or None if no history found.
+    """
+    if not leader_email:
+        return None
+
+    leader_email = leader_email.strip().lower()
+    now = datetime.now(timezone.utc)
+    cutoff = (now - timedelta(days=180)).isoformat()
+
+    params = {
+        "organization": org_uri,
+        "invitee_email": leader_email,
+        "min_start_time": cutoff,
+        "status": "active",
+        "count": 100,
+    }
+
+    try:
+        resp = httpx.get(
+            f"{CALENDLY_BASE}/scheduled_events",
+            headers=CALENDLY_HEADERS,
+            params=params,
+            timeout=30,
+        )
+        resp.raise_for_status()
+    except Exception:
+        log.exception("Calendly API error looking up training history for %s", leader_email)
+        return None
+
+    latest_end: datetime | None = None
+    for event in resp.json().get("collection", []):
+        event_name = event.get("name", "").lower()
+        if not any(term in event_name for term in config.CALENDLY_TRAINING_EVENT_NAMES):
+            continue
+        end_time_str = event.get("end_time", "")
+        if not end_time_str:
+            continue
+        try:
+            end_time = datetime.fromisoformat(end_time_str.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if end_time >= now:
+            continue
+        if latest_end is None or end_time > latest_end:
+            latest_end = end_time
+
+    return latest_end
+
+
+def is_training_recent(org_uri: str, leader_email: str) -> tuple[bool, datetime | None]:
+    """Check if a leader's last training was within TRAINING_RECENCY_DAYS.
+
+    Returns (is_recent, last_training_date).
+    - (True, date) if trained within recency window
+    - (False, date) if trained but too long ago
+    - (False, None) if no training history found
+    """
+    last_date = get_last_training_date(org_uri, leader_email)
+    if last_date is None:
+        return False, None
+
+    age_days = (datetime.now(timezone.utc) - last_date).days
+    return age_days <= config.TRAINING_RECENCY_DAYS, last_date
+
+
+# ---------------------------------------------------------------------------
 # Notion: search by email fallback
 # ---------------------------------------------------------------------------
 
