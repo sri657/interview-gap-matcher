@@ -287,13 +287,17 @@ def _find_existing_onboarding_page(leader_name: str) -> tuple[str, str] | None:
         if existing_clean and existing_clean in new_lower:
             return page["id"], page.get("url", "")
 
-        # First name matches + last initial matches (e.g. "Lahni Snow" vs "Lahni S")
+        # First name matches + last name matches (full or one is an abbreviation of the other)
         existing_parts = existing_clean.split()
         if len(new_parts) >= 2 and len(existing_parts) >= 2:
-            if new_parts[0] == existing_parts[0] and (
-                new_parts[-1][0] == existing_parts[-1][0]
-            ):
-                return page["id"], page.get("url", "")
+            if new_parts[0] == existing_parts[0]:
+                # Full last name match
+                if new_parts[-1] == existing_parts[-1]:
+                    return page["id"], page.get("url", "")
+                # One last name is an abbreviation of the other (e.g. "S" vs "Snow")
+                short, long = sorted([new_parts[-1], existing_parts[-1]], key=len)
+                if len(short) <= 2 and long.startswith(short):
+                    return page["id"], page.get("url", "")
 
         # Check for parenthetical aliases: "Nahlani (Lahni) Snow" should match "Lahni Snow"
         alias_match = re.search(r'\(([^)]+)\)', existing_clean)
