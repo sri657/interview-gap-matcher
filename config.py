@@ -131,7 +131,7 @@ CANDIDATE_FRESHNESS_MONTHS = 6
 # ---------------------------------------------------------------------------
 # Email digest (SMTP)
 # ---------------------------------------------------------------------------
-EMAIL_TO = os.environ.get("EMAIL_TO", "katherine@kodely.io,arissa@kodely.io,isabella.deeb@kodely.io,servando@kodely.io,jethro@kodely.io,mitzi.yap@kodely.io")
+EMAIL_TO = os.environ.get("EMAIL_TO", "katherine@kodely.io,arissa@kodely.io,arissa.kwan@kodely.io,isabella.deeb@kodely.io,servando@kodely.io,jethro@kodely.io,mitzi.yap@kodely.io")
 EMAIL_CC = os.environ.get("EMAIL_CC", "sri@kodely.io")
 EMAIL_FROM = os.environ.get("EMAIL_FROM", "")
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
