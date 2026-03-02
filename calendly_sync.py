@@ -240,6 +240,137 @@ def _find_page_by_email(email: str) -> tuple[str, str] | None:
 
 
 # ---------------------------------------------------------------------------
+# Interview DB dual-write helpers
+# ---------------------------------------------------------------------------
+
+def _find_interview_card(email: str) -> str | None:
+    """Find interview DB page_id by email. Returns None if not found."""
+    if not email:
+        return None
+    body = {"filter": {"property": "Email", "email": {"equals": email.lower()}}, "page_size": 1}
+    resp = httpx.post(
+        f"{NOTION_BASE}/databases/{config.NOTION_DATABASE_ID}/query",
+        headers=NOTION_HEADERS,
+        json=body,
+        timeout=15,
+    )
+    if resp.status_code >= 400:
+        return None
+    results = resp.json().get("results", [])
+    return results[0]["id"] if results else None
+
+
+def _leader_type_from_event(event_name: str) -> str:
+    """Infer Leader Type from Calendly event name."""
+    n = event_name.lower()
+    if "returning" in n or "feedback" in n:
+        return "Returning"
+    return "New"
+
+
+def _patch_interview_card_for_training(
+    email: str,
+    trainer_name: str,
+    event_start: str,
+    advance_status: bool = True,
+    event_name: str = "",
+) -> str | None:
+    """Dual-write training assignment to the interview DB card.
+
+    Returns the interview card page_id on success, None if not found.
+    """
+    page_id = _find_interview_card(email)
+    if not page_id:
+        log.debug("No interview card found for %s — skipping dual-write", email)
+        return None
+
+    properties: dict = {"🎓 Trainer": {"select": {"name": trainer_name}}}
+
+    if event_name:
+        properties["🎓 Leader Type"] = {"select": {"name": _leader_type_from_event(event_name)}}
+
+    if event_start:
+        try:
+            dt = datetime.fromisoformat(event_start.replace("Z", "+00:00"))
+            properties["🎓 Training Date"] = {"date": {"start": dt.isoformat()}}
+        except (ValueError, TypeError):
+            pass
+
+    if advance_status:
+        properties["Status"] = {"select": {"name": "Training In Progress"}}
+
+    resp = httpx.patch(
+        f"{NOTION_BASE}/pages/{page_id}",
+        headers=NOTION_HEADERS,
+        json={"properties": properties},
+        timeout=15,
+    )
+    if resp.status_code >= 400:
+        log.warning("Failed to dual-write training to interview card for %s: %s", email, resp.status_code)
+    else:
+        log.debug("Dual-wrote training assignment to interview card for %s", email)
+
+    return page_id
+
+
+def _append_training_body(page_id: str, trainer_name: str, event_name: str, date_display: str) -> None:
+    """Append a training summary + notes toggle to the interview card page body.
+
+    Called once per booking (dedup handled by state file in main). Mirrors the
+    interview template style so the card shows a clear per-stage history.
+    """
+    def _text(content, bold=False):
+        obj = {"type": "text", "text": {"content": content}}
+        if bold:
+            obj["annotations"] = {"bold": True}
+        return obj
+
+    blocks = [
+        {"object": "block", "type": "divider", "divider": {}},
+        {
+            "object": "block", "type": "heading_2",
+            "heading_2": {"rich_text": [_text("🎯 Training Session")]},
+        },
+        {
+            "object": "block", "type": "callout",
+            "callout": {
+                "rich_text": [_text(
+                    f"Trainer: {trainer_name}  •  Type: {event_name}  •  Date: {date_display}"
+                )],
+                "icon": {"type": "emoji", "emoji": "🎯"},
+                "color": "green_background",
+            },
+        },
+        {
+            "object": "block", "type": "toggle",
+            "toggle": {
+                "rich_text": [_text("Training Notes", bold=True)],
+                "children": [
+                    {
+                        "object": "block", "type": "paragraph",
+                        "paragraph": {
+                            "rich_text": [_text("→ Notes: ", bold=True)],
+                            "color": "gray_background",
+                        },
+                    }
+                ],
+            },
+        },
+    ]
+
+    resp = httpx.patch(
+        f"{NOTION_BASE}/blocks/{page_id}/children",
+        headers=NOTION_HEADERS,
+        json={"children": blocks},
+        timeout=15,
+    )
+    if resp.status_code >= 400:
+        log.warning("Failed to append training body to interview card %s: %s", page_id, resp.status_code)
+    else:
+        log.debug("Appended training body to interview card %s", page_id)
+
+
+# ---------------------------------------------------------------------------
 # Process a single booking
 # ---------------------------------------------------------------------------
 
@@ -248,6 +379,7 @@ def process_booking(
     invitee_email: str,
     trainer_name: str,
     event_start: str,
+    event_name: str = "",
     dry_run: bool = False,
     slack: SlackClient | None = None,
 ) -> bool:
@@ -312,7 +444,8 @@ def process_booking(
     }
 
     # Advance pipeline if currently in Onboarding Setup
-    if current_status == "Onboarding Setup":
+    advancing = current_status == "Onboarding Setup"
+    if advancing:
         properties["Readiness Status"] = {"select": {"name": "Training In Progress"}}
         log.info("Advancing %s from Onboarding Setup → Training In Progress", invitee_name)
 
@@ -327,6 +460,17 @@ def process_booking(
         return False
 
     log.info("Updated Notion card for %s — Trainer: %s", invitee_name, trainer_name)
+
+    # --- Dual-write: patch interview DB card + append training body section ---
+    iv_page_id = _patch_interview_card_for_training(
+        email=invitee_email,
+        trainer_name=trainer_name,
+        event_start=event_start,
+        advance_status=advancing or current_status in ("Matched", "Background Check Pending"),
+        event_name=event_name,
+    )
+    if iv_page_id:
+        _append_training_body(iv_page_id, trainer_name, event_name, training_date_display)
 
     # --- Post Slack alert ---
     if slack:
@@ -523,6 +667,22 @@ def check_training_completion(
         log.info("Training complete for %s — marked Complete", name)
         state[completion_key] = datetime.now(timezone.utc).isoformat()
 
+        # Dual-write: advance interview DB card to Training Complete
+        _patch_interview_card_for_training(
+            email=leader_email,
+            trainer_name="",
+            event_start="",
+            advance_status=False,
+        )
+        iv_page_id = _find_interview_card(leader_email)
+        if iv_page_id:
+            httpx.patch(
+                f"{NOTION_BASE}/pages/{iv_page_id}",
+                headers=NOTION_HEADERS,
+                json={"properties": {"Status": {"select": {"name": "Training Complete"}}}},
+                timeout=15,
+            )
+
         if slack:
             msg = (
                 f":mortar_board: TRAINING COMPLETED\n\n"
@@ -597,6 +757,7 @@ def main() -> None:
                 invitee_email=invitee_email,
                 trainer_name=trainer_name,
                 event_start=event.get("start_time", ""),
+                event_name=event.get("name", ""),
                 dry_run=args.dry_run,
                 slack=slack,
             )

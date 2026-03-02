@@ -246,6 +246,45 @@ def _patch_compliance_status(page_id: str, status: str) -> bool:
     return True
 
 
+def _find_interview_card_by_email(email: str) -> str | None:
+    """Query the interview DB for a card by email. Returns the page_id or None."""
+    if not email:
+        return None
+    body = {
+        "filter": {"property": "Email", "email": {"equals": email.lower()}},
+        "page_size": 1,
+    }
+    resp = httpx.post(
+        f"{NOTION_BASE}/databases/{config.NOTION_DATABASE_ID}/query",
+        headers=NOTION_HEADERS,
+        json=body,
+        timeout=30,
+    )
+    if resp.status_code >= 400:
+        log.debug("Interview DB query failed for %s: %s", email, resp.status_code)
+        return None
+    results = resp.json().get("results", [])
+    return results[0]["id"] if results else None
+
+
+def _patch_interview_compliance_status(email: str, status: str) -> None:
+    """Dual-write Compliance Status to the interview DB card (transition period)."""
+    page_id = _find_interview_card_by_email(email)
+    if not page_id:
+        log.debug("No interview card found for %s — skipping interview DB compliance patch", email)
+        return
+    resp = httpx.patch(
+        f"{NOTION_BASE}/pages/{page_id}",
+        headers=NOTION_HEADERS,
+        json={"properties": {"🎓 Compliance": {"select": {"name": status}}}},
+        timeout=30,
+    )
+    if resp.status_code >= 400:
+        log.warning("Failed to patch interview DB Compliance Status for %s: %s", email, resp.status_code)
+    else:
+        log.debug("Dual-wrote Compliance Status '%s' to interview card for %s", status, email)
+
+
 # ---------------------------------------------------------------------------
 # Form Responses email lookup
 # ---------------------------------------------------------------------------
@@ -771,6 +810,7 @@ def send_new_invitations(
             else:
                 sterling_leaders.append((clean_name, email, page_id))
                 _patch_compliance_status(page_id, "Sterling Needed")
+                _patch_interview_compliance_status(email, "Sterling Needed")
                 log.info("Under-18 leader %s — flagged for Sterling (not Checkr)", clean_name)
                 state[f"sterling_notified_{page_id}"] = datetime.now(timezone.utc).isoformat()
             processed += 1
@@ -796,6 +836,7 @@ def send_new_invitations(
                 print()
             else:
                 _patch_compliance_status(page_id, "Cleared")
+                _patch_interview_compliance_status(email, "Cleared")
                 log.info("Checkr already clear for %s — auto-set Compliance to Cleared", clean_name)
 
                 # Also backfill email to Notion if it wasn't there
@@ -852,6 +893,7 @@ def send_new_invitations(
         # Update Notion: Compliance Status = "Sent"
         if _patch_compliance_status(page_id, "Sent"):
             log.info("Checkr invitation sent for %s (inv: %s)", clean_name, invitation_id)
+        _patch_interview_compliance_status(email, "Sent")
 
         # Backfill email to Notion if missing
         _backfill_email(page_id, page, email)
@@ -908,6 +950,7 @@ def poll_pending(
         name = _get_leader_name(page)
         sent_data = state.get(f"sent_{page_id}", {})
         invitation_id = sent_data.get("invitation_id")
+        leader_email = sent_data.get("email", "") or _get_email(page)
 
         if not invitation_id:
             log.debug("No Checkr invitation ID in state for %s — skipping poll", name)
@@ -929,6 +972,7 @@ def poll_pending(
         if status == "clear":
             if _patch_compliance_status(page_id, "Cleared"):
                 log.info("Checkr CLEARED for %s — Compliance set to Cleared", name)
+            _patch_interview_compliance_status(leader_email, "Cleared")
 
             state[f"cleared_{page_id}"] = datetime.now(timezone.utc).isoformat()
 
@@ -948,6 +992,7 @@ def poll_pending(
         elif status in ("suspended", "dispute", "consider"):
             log.warning("Checkr status '%s' for %s — flagging", status, name)
             _patch_compliance_status(page_id, status.capitalize())
+            _patch_interview_compliance_status(leader_email, status.capitalize())
 
             if slack:
                 msg = (
